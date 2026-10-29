@@ -4,6 +4,8 @@ name: Build Desktop Client
 on:
   push:
     tags: ['v*']
+    branches: ['main']
+    paths: ['.github/workflows/tauri-release.yml']
 
 permissions:
   contents: write
@@ -32,10 +34,10 @@ jobs:
           if (!$env:SIGNING_KEY -or !$env:SIGNING_PASSWORD) { throw '缺少桌面更新签名密钥或密码' }
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw '正式发布只接受 x.y.z 稳定版本' }
-          if ($env:GITHUB_REF_NAME -ne "v$version") { throw '标签与项目版本不一致' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") { throw '标签与项目版本不一致' }
           $releases = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw '无法检查已有发布' }
-          if ($releases | Where-Object { $_.tag_name -eq $env:GITHUB_REF_NAME }) { throw '该版本已存在，请使用新版本号，禁止覆盖' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and ($releases | Where-Object { $_.tag_name -eq $env:GITHUB_REF_NAME })) { throw '该版本已存在，请使用新版本号，禁止覆盖' }
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -44,6 +46,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: 1.96.0
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
@@ -70,14 +73,16 @@ jobs:
 
       - name: 检查 Rust 逻辑和发布产物
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
+          cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --lib --no-deps -- -D warnings
+          cargo clippy --manifest-path src-tauri/Cargo.toml --locked --release --lib --no-deps -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run release:prepare -- --tag $env:GITHUB_REF_NAME
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          npm run release:prepare -- --tag "v$version"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 上传已验签的桌面发布文件
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

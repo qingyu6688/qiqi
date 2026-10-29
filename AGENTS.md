@@ -177,7 +177,7 @@ else params = baseParams
   - `RELEASE.md` 标题中的版本号和日期。
   - `src-tauri/Cargo.toml` 的 `version`，以及 `src-tauri/Cargo.lock` 中 `qiqi` 包的 `version`（`tauri.conf.json` 直接引用 `package.json`，无需修改）。
 - 客户端更新包由 `tauri build` 用私钥签名（`TAURI_SIGNING_PRIVATE_KEY`，私钥设有密码，需同时提供 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；GitHub Secrets 中两者都要设置，本机打包时以环境变量传入，密码不得写进任何文件或提交），发布的 Release 中必须包含安装包、对应的 `.sig` 和 `latest.json`，否则客户端的应用内更新会提示找不到更新包；私钥不得提交进仓库。
-- 推送 `v版本号` tag 触发 `.github/workflows/tauri-release.yml`，仅构建 Windows 桌面端。流程检查版本、运行测试、生成签名、验证安装包与更新清单，再发布 Release；已存在的正式版本禁止覆盖，应递增版本号。
+- 推送 `v版本号` tag 触发 `.github/workflows/tauri-release.yml`，仅构建 Windows 桌面端；工具链固定为已验证的 Rust 1.96.0。main 修改工作流只执行构建验证，不发布。流程检查版本、运行测试、生成签名、验证安装包与更新清单，再发布 Release；已存在的正式版本禁止覆盖，应递增版本号。
 - 发布仓库固定为 `qingyu6688/qiqi`。公钥与更新地址放入 `tauri.conf.json`，私钥及密码只从 GitHub Actions Secrets 或本机受保护的凭据读取，禁止提交。
 - 网页、Vercel、Docker 的旧工作流保留在 `.github/disabled-workflows/`，不会触发部署。桌面构建写入 `dist-desktop/`。
 - 修改 `src-tauri/windows/installer.nsi`（基于 Tauri 内置模板的自定义 NSIS 模板）或升级 `@tauri-apps/cli` 时，需对照新版内置模板同步，并在本机用 `npm run tauri:build` 构建后实测安装、覆盖安装和卸载。
