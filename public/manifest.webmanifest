@@ -1,0 +1,24 @@
+{
+  "name": "柒柒",
+  "short_name": "柒柒",
+  "description": "柒柒图片创作工作台，支持本机保存的多轮对话生图",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#030712",
+  "theme_color": "#111827",
+  "icons": [
+    {
+      "src": "./qiqi.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./qiqi.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
