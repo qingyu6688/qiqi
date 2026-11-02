@@ -2,7 +2,7 @@
 
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import MarkdownRenderer from './MarkdownRenderer'
 
@@ -40,6 +40,11 @@ let root: ReturnType<typeof createRoot> | null = null
 // 让 React 知道当前在测试环境中使用 act
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
+// 渲染器按需加载，首次转换模块在并行跑测试时可能需要数秒，先预热，渲染时只等组件更新
+beforeAll(async () => {
+  await Promise.all([import('streamdown'), import('@streamdown/math'), import('react-markdown'), import('remark-gfm')])
+}, 60_000)
+
 afterEach(() => {
   act(() => root?.unmount())
   root = null
@@ -52,7 +57,8 @@ async function render(content: string, Renderer = MarkdownRenderer, readySelecto
   root = createRoot(container)
   await act(async () => root!.render(<Renderer content={content} />))
   // 渲染器按需异步加载，等到输出 Markdown 内容
-  for (let i = 0; i < 100 && !container.querySelector(readySelector); i++) {
+  const deadline = Date.now() + 10_000
+  while (!container.querySelector(readySelector) && Date.now() < deadline) {
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)))
   }
   expect(container.querySelector(readySelector)).not.toBeNull()
@@ -71,7 +77,7 @@ function expectNoExecutableContent(el: HTMLElement) {
   for (const url of urls) expect(url).not.toMatch(/^\s*(javascript|vbscript|data):/i)
 }
 
-describe('MarkdownRenderer 安全性', () => {
+describe('MarkdownRenderer 安全性', { timeout: 15_000 }, () => {
   it('不渲染原始 HTML、事件属性和危险标签', async () => {
     const el = await render(MALICIOUS_MARKDOWN)
 
@@ -89,9 +95,13 @@ describe('MarkdownRenderer 安全性', () => {
     expect(el.querySelector('#root')).toBeNull()
   })
 
-  it('原始 HTML 中的远程图片会被渲染（与 Markdown 图片一致）', async () => {
+  it('原始 HTML 中的远程图片与 Markdown 图片一样需要点击后加载', async () => {
     const el = await render(MALICIOUS_MARKDOWN)
 
+    expect(el.querySelector('img[src="https://example.com/raw.png"]')).toBeNull()
+    const button = el.querySelector<HTMLButtonElement>('[data-markdown-remote-image][title="https://example.com/raw.png"]')
+    expect(button?.textContent).toContain('example.com')
+    await act(async () => button!.click())
     expect(el.querySelector('img[src="https://example.com/raw.png"]')).not.toBeNull()
   })
 
@@ -117,9 +127,13 @@ describe('MarkdownRenderer 安全性', () => {
     expect(el.textContent).toContain('graph TD; A-->B')
   })
 
-  it('Markdown 图片渲染为普通图片，不带下载按钮', async () => {
-    const el = await render(['![远程](https://example.com/a.png)', '', '![危险](javascript:alert(1))'].join('\n'), MarkdownRenderer, 'img')
+  it('外部图片先显示占位、不发出请求，点击后渲染为普通图片且不带下载按钮', async () => {
+    const el = await render(['![远程](https://example.com/a.png)', '', '![危险](javascript:alert(1))'].join('\n'), MarkdownRenderer, '[data-markdown-remote-image]')
 
+    expect(el.querySelector('img')).toBeNull()
+    const button = el.querySelector<HTMLButtonElement>('[data-markdown-remote-image]')!
+    expect(button.textContent).toBe('加载外部图片「远程」（example.com）')
+    await act(async () => button.click())
     const img = el.querySelector('img[src="https://example.com/a.png"]')
     expect(img).not.toBeNull()
     expect(img?.getAttribute('alt')).toBe('远程')
@@ -128,9 +142,17 @@ describe('MarkdownRenderer 安全性', () => {
     expectNoExecutableContent(el)
   })
 
-  it('Markdown 图片加载失败时显示“图片不可用”', async () => {
-    const el = await render('![远程](https://example.com/broken.png)', MarkdownRenderer, 'img')
+  it('同源图片直接显示', async () => {
+    const el = await render('![本地](/announcements/cat.png)', MarkdownRenderer, 'img')
 
+    expect(el.querySelector('img[src="/announcements/cat.png"]')).not.toBeNull()
+    expect(el.querySelector('[data-markdown-remote-image]')).toBeNull()
+  })
+
+  it('Markdown 图片加载失败时显示“图片不可用”', async () => {
+    const el = await render('![远程](https://example.com/broken.png)', MarkdownRenderer, '[data-markdown-remote-image]')
+
+    await act(async () => el.querySelector<HTMLButtonElement>('[data-markdown-remote-image]')!.click())
     await act(async () => el.querySelector('img')!.dispatchEvent(new Event('error')))
 
     expect(el.querySelector('img')).toBeNull()
@@ -138,7 +160,7 @@ describe('MarkdownRenderer 安全性', () => {
   })
 })
 
-describe('MarkdownRenderer 回退到 react-markdown', () => {
+describe('MarkdownRenderer 回退到 react-markdown', { timeout: 15_000 }, () => {
   it('不渲染原始 HTML，危险链接被替换', async () => {
     // 让 streamdown 加载失败，走旧浏览器使用的 react-markdown 路径
     vi.resetModules()
@@ -146,9 +168,11 @@ describe('MarkdownRenderer 回退到 react-markdown', () => {
       throw new Error('streamdown 不可用')
     })
     const { default: LegacyRenderer } = await import('./MarkdownRenderer')
-    const el = await render(MALICIOUS_MARKDOWN, LegacyRenderer, '.markdown-renderer p')
+    const el = await render(`${MALICIOUS_MARKDOWN}\n\n![远程](https://example.com/legacy.png)`, LegacyRenderer, '.markdown-renderer p')
 
     expectNoExecutableContent(el)
+    expect(el.querySelector('img[src="https://example.com/legacy.png"]')).toBeNull()
+    expect(el.querySelector('[data-markdown-remote-image][title="https://example.com/legacy.png"]')).not.toBeNull()
     expect(el.querySelector('img[src="x"]')).toBeNull()
     expect(el.querySelector('#root')).toBeNull()
     expect(el.querySelector('a[href="https://example.com"]')).not.toBeNull()

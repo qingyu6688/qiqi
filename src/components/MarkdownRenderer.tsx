@@ -26,11 +26,37 @@ type MarkdownRendererState =
 
 const allowedUrlProtocols = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 
-// streamdown 2.5 的图片组件自带下载按钮且没有关闭选项，这里渲染为普通图片；src 已经过 urlTransform 与 sanitize 处理
+/** 其他站点的图片返回其主机名；同源相对地址返回 null */
+function getRemoteImageHost(src: string) {
+  try {
+    const url = new URL(src, window.location.href)
+    return url.origin === window.location.origin ? null : url.host
+  } catch {
+    return null
+  }
+}
+
+// streamdown 2.5 的图片组件自带下载按钮且没有关闭选项，这里渲染为普通图片；src 已经过 urlTransform 与 sanitize 处理。
+// 模型回复、导入的配置说明等内容可能被诱导写入带查询参数的外部图片地址，自动加载会把参数发给第三方，因此外部图片点击后才加载
 function MarkdownImage({ node: _node, src, onError, ...props }: ComponentProps<'img'> & ExtraProps) {
   const [failedSrc, setFailedSrc] = useState<typeof src>()
+  const [allowedSrc, setAllowedSrc] = useState<typeof src>()
   if (!src) return null
   if (failedSrc === src) return <span className="text-muted-foreground text-xs italic">图片不可用</span>
+  const remoteHost = typeof src === 'string' ? getRemoteImageHost(src) : null
+  if (remoteHost && allowedSrc !== src) {
+    return (
+      <button
+        type="button"
+        data-markdown-remote-image=""
+        title={String(src)}
+        onClick={() => setAllowedSrc(src)}
+        className="inline-flex max-w-full items-center rounded-md border border-dashed border-gray-300 px-2 py-0.5 text-xs text-gray-500 transition-colors hover:bg-black/[0.04] dark:border-gray-600 dark:text-gray-400 dark:hover:bg-white/[0.06]"
+      >
+        <span className="truncate">加载外部图片{props.alt ? `「${props.alt}」` : ''}（{remoteHost}）</span>
+      </button>
+    )
+  }
   return (
     <img
       {...props}
@@ -84,6 +110,7 @@ const legacyMarkdownComponents: ReactMarkdownComponents = {
       </a>
     )
   },
+  img: MarkdownImage,
 }
 
 const translations: Partial<StreamdownTranslations> = {
