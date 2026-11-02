@@ -38,7 +38,7 @@ function parseConcurrency(input: string, fallback: number) {
 }
 
 /** 并发数输入框：随弹层挂载，打开时从已保存的值初始化，聚焦输入时实时提示过高的并发数 */
-function ConcurrencyInput({ value, disabled, onCommit }: { value: number; disabled: boolean; onCommit: (value: number) => void }) {
+export function ConcurrencyInput({ value, disabled, onCommit }: { value: number; disabled: boolean; onCommit: (value: number) => void }) {
   const [input, setInput] = useState(String(value))
   const [focused, setFocused] = useState(false)
   const latestRef = useRef({ input, value, onCommit })
@@ -79,7 +79,7 @@ function ConcurrencyInput({ value, disabled, onCommit }: { value: number; disabl
       />
       <ButtonTooltip
         visible={focused && Number(input) > DEFAULT_BATCH_PROMPT_CONCURRENCY}
-        text={`并发数超过 ${DEFAULT_BATCH_PROMPT_CONCURRENCY} 可能导致${isTauri ? '客户端' : '浏览器'}卡顿或触发服务商限流`}
+        text={`同时请求数超过 ${DEFAULT_BATCH_PROMPT_CONCURRENCY} 可能导致${isTauri ? '客户端' : '浏览器'}卡顿或触发服务商限流`}
       />
     </>
   )
@@ -470,37 +470,38 @@ export default function InputParamsPanel({
                   />
                 </div>
               </div>
-              {batchMode === 'concurrent' && (
-                <div className={ROW_CLASS}>
-                  <span className={ROW_LABEL_CLASS}>限制并发数</span>
-                  <Switch
-                    checked={batchConcurrencyLimited}
-                    disabled={Boolean(batchProgress)}
-                    label="限制并发数"
-                    onToggle={() => onBatchChange({ batchPromptConcurrencyLimited: !batchConcurrencyLimited })}
-                  />
-                </div>
-              )}
-              {batchMode === 'concurrent' && batchConcurrencyLimited && (
-                <label className={ROW_CLASS}>
-                  <span className={ROW_LABEL_CLASS}>并发数</span>
-                  <ConcurrencyInput
-                    value={batchConcurrency}
-                    disabled={Boolean(batchProgress)}
-                    onCommit={(value) => onBatchChange({ batchPromptConcurrency: value })}
-                  />
-                </label>
-              )}
-              {batchMode === 'concurrent' && !batchConcurrencyLimited && (
-                <p className="rounded-lg bg-amber-500/[0.1] px-2.5 py-2 text-[11px] leading-relaxed text-amber-700 dark:bg-amber-500/[0.14] dark:text-amber-400/90">
-                  不限制并发时会同时发出全部请求，提示词较多时可能导致{isTauri ? '客户端' : '浏览器'}卡顿甚至崩溃，也容易触发服务商限流。
-                </p>
-              )}
               <p className="text-[11px] leading-relaxed text-gray-400 dark:text-gray-500">
                 提示词之间空两行分隔，当前共 {batchPromptCount} 条；参考图和参数对每条提示词都生效。
               </p>
             </>
           )}
+          <div className={ROW_CLASS}>
+            <span className={ROW_LABEL_CLASS}>限制同时请求数</span>
+            <Switch
+              checked={batchConcurrencyLimited}
+              disabled={Boolean(batchProgress)}
+              label="限制同时请求数"
+              onToggle={() => onBatchChange({ batchPromptConcurrencyLimited: !batchConcurrencyLimited })}
+            />
+          </div>
+          {batchConcurrencyLimited && (
+            <label className={ROW_CLASS}>
+              <span className={ROW_LABEL_CLASS}>同时请求数</span>
+              <ConcurrencyInput
+                value={batchConcurrency}
+                disabled={Boolean(batchProgress)}
+                onCommit={(value) => onBatchChange({ batchPromptConcurrency: value })}
+              />
+            </label>
+          )}
+          {!batchConcurrencyLimited && (
+            <p className="rounded-lg bg-amber-500/[0.1] px-2.5 py-2 text-[11px] leading-relaxed text-amber-700 dark:bg-amber-500/[0.14] dark:text-amber-400/90">
+              不限制时会立即发出全部生图请求，任务较多时可能导致{isTauri ? '客户端' : '浏览器'}卡顿甚至崩溃，也容易触发服务商限流。
+            </p>
+          )}
+          <p className="text-[11px] leading-relaxed text-gray-400 dark:text-gray-500">
+            画廊、对话、重试和单条多图共用这个上限，超出的请求排队等待，排队时间不计入超时。
+          </p>
           {batchProgress && (
             <div className={ROW_CLASS}>
               <span className={ROW_LABEL_CLASS}>

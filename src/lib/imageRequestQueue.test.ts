@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { withImageRequestSlot } from './imageRequestQueue'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { getImageRequestConcurrency, setImageRequestConcurrency, withImageRequestSlot } from './imageRequestQueue'
 import { settleWithConcurrency } from './batchPrompts'
 
 function deferred() {
@@ -9,6 +9,8 @@ function deferred() {
 }
 
 describe('全局生图请求队列', () => {
+  afterEach(() => setImageRequestConcurrency(2))
+
   it('多批请求共享两个名额，保持各批返回顺序', async () => {
     let active = 0
     let peak = 0
@@ -57,5 +59,56 @@ describe('全局生图请求队列', () => {
     await rejection
     expect(onRequestStarted).toHaveBeenCalledOnce()
     await expect(withImageRequestSlot(async () => '下一张')).resolves.toBe('下一张')
+  })
+
+  it('调高上限后立即放行排队请求，不限制时全部同时开始', async () => {
+    const gate = deferred()
+    let active = 0
+    const running = Array.from({ length: 5 }, () => withImageRequestSlot(async () => {
+      active += 1
+      await gate.promise
+      active -= 1
+    }))
+    await vi.waitFor(() => expect(active).toBe(2))
+    setImageRequestConcurrency(4)
+    await vi.waitFor(() => expect(active).toBe(4))
+    setImageRequestConcurrency(Infinity)
+    expect(getImageRequestConcurrency()).toBe(Infinity)
+    await vi.waitFor(() => expect(active).toBe(5))
+    gate.resolve()
+    await Promise.all(running)
+  })
+
+  it('调低上限不打断已发出的请求，之后按新上限放行', async () => {
+    setImageRequestConcurrency(3)
+    const gates = [deferred(), deferred(), deferred()]
+    let active = 0
+    let peakAfterLowering = 0
+    let lowered = false
+    const run = (gate: Promise<void>) => withImageRequestSlot(async () => {
+      active += 1
+      if (lowered) peakAfterLowering = Math.max(peakAfterLowering, active)
+      await gate
+      active -= 1
+    })
+    const running = gates.map((gate) => run(gate.promise))
+    await vi.waitFor(() => expect(active).toBe(3))
+    setImageRequestConcurrency(1)
+    lowered = true
+    const queued = [run(Promise.resolve()), run(Promise.resolve())]
+    gates[0].resolve()
+    await running[0]
+    expect(active).toBe(2)
+    gates[1].resolve()
+    gates[2].resolve()
+    await Promise.all([...running, ...queued])
+    expect(peakAfterLowering).toBe(1)
+  })
+
+  it('无效上限按 1 处理', () => {
+    setImageRequestConcurrency(0)
+    expect(getImageRequestConcurrency()).toBe(1)
+    setImageRequestConcurrency(Number.NaN)
+    expect(getImageRequestConcurrency()).toBe(1)
   })
 })

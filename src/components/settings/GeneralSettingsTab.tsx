@@ -7,6 +7,7 @@ import { getDefaultSaveDir, openDefaultSaveDir } from '../../lib/saveFile'
 import { openTauriLogDir } from '../../lib/tauriLog'
 import { useStore } from '../../store'
 import Select from '../Select'
+import { ConcurrencyInput } from '../input/inputParamsPanel'
 import ProxySettingsSection from './ProxySettingsSection'
 import ShortcutRecorder from './ShortcutRecorder'
 import { changeSaveDirWithMigration } from './saveDirMigration'
@@ -123,6 +124,34 @@ export default function GeneralSettingsTab({
           </div>
           <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
             开启后，首页参数栏会显示“批量”选项，可将空两行分隔的多条提示词一次提交，支持排队或并发执行。
+          </div>
+        </div>
+        <div className="block">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="block text-sm text-gray-600 dark:text-gray-300">限制同时生图请求数</span>
+            <button
+              type="button"
+              onClick={() => commitSettings({ ...draft, batchPromptConcurrencyLimited: !draft.batchPromptConcurrencyLimited })}
+              className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${draft.batchPromptConcurrencyLimited ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+              role="switch"
+              aria-checked={draft.batchPromptConcurrencyLimited}
+              aria-label="限制同时生图请求数"
+            >
+              <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${draft.batchPromptConcurrencyLimited ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
+            </button>
+          </div>
+          {draft.batchPromptConcurrencyLimited && (
+            <label className="relative mb-1 flex items-center justify-between gap-3 text-xs">
+              <span className="text-gray-500 dark:text-gray-400">同时请求数</span>
+              <ConcurrencyInput
+                value={draft.batchPromptConcurrency}
+                disabled={false}
+                onCommit={(value) => commitSettings({ ...draft, batchPromptConcurrency: value })}
+              />
+            </label>
+          )}
+          <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
+            画廊、对话生图、重试和单条多图共用这个上限，超出的请求排队等待，排队时间不计入超时；批量并发提交时也按这个数量同时提交提示词。关闭限制会立即发出全部请求，容易触发服务商限流。
           </div>
         </div>
         <div className="block">

@@ -60,7 +60,8 @@ import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
-import { IMAGE_REQUEST_CONCURRENCY, runWithConcurrency, settleWithConcurrency, splitBatchPrompts } from './lib/batchPrompts'
+import { runWithConcurrency, settleWithConcurrency, splitBatchPrompts } from './lib/batchPrompts'
+import { getImageRequestConcurrency, setImageRequestConcurrency } from './lib/imageRequestQueue'
 import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, scheduleMissingThumbnailBackfill } from './lib/imageCache'
@@ -1199,6 +1200,13 @@ useStore.subscribe((state) => {
   void flushAgentConversationsToIndexedDB().catch(() => reportStorageSaveFailure('conversations'))
 })
 
+// 画廊、对话、重试和多图拆分共用同一个同时请求数，取自批量设置中的并发数
+const applyImageRequestConcurrency = (settings: AppSettings) => setImageRequestConcurrency(settings.batchPromptConcurrencyLimited ? settings.batchPromptConcurrency : Infinity)
+applyImageRequestConcurrency(useStore.getState().settings)
+useStore.subscribe((state, prev) => {
+  if (state.settings !== prev.settings) applyImageRequestConcurrency(state.settings)
+})
+
 // ===== Actions =====
 
 let uid = 0
@@ -1213,6 +1221,17 @@ function getPersistableTask(task: TaskRecord): TaskRecord {
 
 function putTask(task: TaskRecord): Promise<IDBValidKey> {
   return taskWrites.enqueue(task.id, task).then(() => task.id)
+}
+
+/** 发请求前保存新任务；保存失败时把任务标记为失败后抛出，不发出请求，避免结果无处保存或任务一直显示运行中 */
+async function saveTaskBeforeExecute(task: TaskRecord) {
+  try {
+    await putTask(task)
+  } catch (err) {
+    const msg = `任务记录保存失败，未发送生图请求：${err instanceof Error ? err.message : String(err)}`
+    updateTaskInStore(task.id, createTaskErrorPatch(task, msg, Date.now()))
+    throw new Error(msg)
+  }
 }
 
 export function getCodexCliPromptKey(settings: AppSettings): string {
@@ -1560,7 +1579,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,
-    ...createTaskDonePatch(task, Date.now()),
+    ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
     falRecoverable: false,
   })
   if (!isTaskHiddenByPrivacyMode(task)) {
@@ -1940,7 +1959,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     }
 
     useStore.getState().setTasks([task, ...useStore.getState().tasks])
-    await putTask(task)
+    await saveTaskBeforeExecute(task)
     if (batchId) batchTaskIds.add(task.id)
     // 异步调用 API
     executeTask(task.id)
@@ -1952,7 +1971,13 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   } else if (splitAsyncImages) {
     useStore.getState().showToast(`已开始生成 ${requestedCount} 张独立图片`, 'success')
   } else {
-    await startTask(submissions[0])
+    try {
+      await startTask(submissions[0])
+    } catch (err) {
+      // 保留输入内容，存储恢复后可以直接重新提交
+      useStore.getState().showToast(err instanceof Error ? err.message : String(err), 'error')
+      return
+    }
     useStore.getState().showToast('任务已提交', 'success')
   }
 
@@ -1963,10 +1988,10 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   useStore.getState().setReusedTaskApiProfile(null)
 
   if (batchId) {
-    const configuredLimit = normalizedSettings.batchPromptMode === 'queue'
+    // 实际同时发出的请求数由全局请求队列按同一个并发数设置控制
+    const limit = normalizedSettings.batchPromptMode === 'queue'
       ? 1
       : normalizedSettings.batchPromptConcurrencyLimited ? normalizedSettings.batchPromptConcurrency : submissions.length
-    const limit = splitAsyncImages ? Math.min(configuredLimit, IMAGE_REQUEST_CONCURRENCY) : configuredLimit
     await runBatchPrompts(batchId, submissions, limit, startTask)
   }
 }
@@ -3320,7 +3345,7 @@ async function executeAgentRound(
       }
 
       // 排队期间不启动接口超时计时，上一张结束后再腾出请求名额。
-      const batchResults = await settleWithConcurrency(batchExecutionItems, IMAGE_REQUEST_CONCURRENCY, async ({ item, batchToolCallId, references, referenceIds, taskParams }) => {
+      const batchResults = await settleWithConcurrency(batchExecutionItems, getImageRequestConcurrency(), async ({ item, batchToolCallId, references, referenceIds, taskParams }) => {
         if (controller.signal.aborted) throw createAgentAbortError()
         const taskId = taskIdByToolCallId.get(batchToolCallId)
         if (!taskId || !useStore.getState().tasks.some((task) => task.id === taskId)) throw new Error('任务已删除，未发出图片请求')
@@ -3927,10 +3952,13 @@ async function executeTask(taskId: string) {
     const independentPrompt = task.independentImage
       ? createIndependentImagePrompt(requestPrompt, task.independentImage.index, task.independentImage.total)
       : requestPrompt
+    // 单条多图拆成多个请求时每个请求拿到名额都会回调，耗时从第一个请求发出算起
+    let requestStarted = false
     const result = await callImageApi({
       signal: requestController.signal,
       onRequestStarted: () => {
-        if (taskExecutions.get(taskId) !== execution) return
+        if (taskExecutions.get(taskId) !== execution || requestStarted) return
+        requestStarted = true
         updateTaskInStore(taskId, { agentQueued: false, startedAt: Date.now() })
         if (
           taskProvider !== 'fal' &&
@@ -4028,7 +4056,7 @@ async function executeTask(taskId: string) {
       actualParams,
       actualParamsByImage,
       revisedPromptByImage,
-      ...createTaskDonePatch(task, Date.now()),
+      ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
       falRecoverable: false,
       customRecoverable: false,
     })
@@ -4310,7 +4338,7 @@ export async function retryTask(task: TaskRecord) {
   useStore.getState().setTasks(overwrite
     ? tasks.map((item) => item.id === taskId ? newTask : item)
     : [newTask, ...tasks])
-  await putTask(newTask)
+  const saveError = await saveTaskBeforeExecute(newTask).then(() => null, (err: unknown) => err)
   if (sourceConversation && sourceRound) {
     updateAgentConversation(sourceConversation.id, (current) => ({
       ...current,
@@ -4319,6 +4347,11 @@ export async function retryTask(task: TaskRecord) {
       messages: current.messages.map((message) => message.id === (source.agentMessageId ?? sourceRound.assistantMessageId)
         ? { ...message, outputTaskIds: [...(message.outputTaskIds ?? []), taskId] } : message),
     }))
+  }
+  // 保存失败时数据库里仍是原任务，保留它引用的图片
+  if (saveError) {
+    useStore.getState().showToast(saveError instanceof Error ? saveError.message : String(saveError), 'error')
+    return
   }
   if (overwrite) {
     void deleteUnreferencedImageIds([
@@ -4749,7 +4782,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,
-    ...createTaskDonePatch(task, Date.now()),
+    ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
     customRecoverable: false,
   })
   if (!isTaskHiddenByPrivacyMode(task)) {

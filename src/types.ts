@@ -178,8 +178,9 @@ export interface AppSettings {
   /** 多提示词批量提交，提示词之间空两行分隔 */
   batchPromptEnabled: boolean
   batchPromptMode: BatchPromptMode
-  /** 并发模式下是否限制并发数（默认开启），关闭时全部同时提交 */
+  /** 是否限制同时发出的生图请求数（默认开启），关闭时不设上限；批量并发模式也按它同时提交提示词 */
   batchPromptConcurrencyLimited: boolean
+  /** 所有生图入口共用的同时请求数，也是批量并发模式同时提交的提示词数 */
   batchPromptConcurrency: number
   referenceImageEditAction: ReferenceImageEditAction
   zipDownloadRoutes: ZipDownloadRoute[]

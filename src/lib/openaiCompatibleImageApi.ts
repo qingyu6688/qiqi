@@ -1,7 +1,7 @@
-import { withImageRequestSlot } from './imageRequestQueue'
+import { getImageRequestConcurrency, withImageRequestSlot } from './imageRequestQueue'
 import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type CustomProviderDefinition, type CustomProviderPollMapping, type CustomProviderResultMapping, type CustomProviderSubmitMapping, type ImageApiResponse, type ImageResponseItem, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
-import { IMAGE_REQUEST_CONCURRENCY, settleWithConcurrency } from './batchPrompts'
+import { settleWithConcurrency } from './batchPrompts'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import {
   assertImageInputPayloadSize,
@@ -476,7 +476,7 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
     },
   }
   const results = await settleWithConcurrency(
-    Array.from({ length: n }), IMAGE_REQUEST_CONCURRENCY, (_, requestIndex) => callImagesApiSingle({
+    Array.from({ length: n }), getImageRequestConcurrency(), (_, requestIndex) => callImagesApiSingle({
       ...singleOpts,
       prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n),
       onPartialImage: opts.onPartialImage
@@ -1047,7 +1047,7 @@ async function callCustomHttpImageApiConcurrent(
   customProvider: CustomProviderDefinition,
   n: number,
 ): Promise<CallApiResult> {
-  const results = await settleWithConcurrency(Array.from({ length: n }), IMAGE_REQUEST_CONCURRENCY, (_, requestIndex) => callCustomHttpImageApi({
+  const results = await settleWithConcurrency(Array.from({ length: n }), getImageRequestConcurrency(), (_, requestIndex) => callCustomHttpImageApi({
     ...opts,
     prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n),
     params: { ...opts.params, n: 1 },
@@ -1061,7 +1061,7 @@ async function callResponsesImageApi(opts: CallApiOptions, profile: ApiProfile):
     return callResponsesImageApiSingle(opts, profile)
   }
 
-  const results = await settleWithConcurrency(Array.from({ length: n }), IMAGE_REQUEST_CONCURRENCY, (_, requestIndex) => callResponsesImageApiSingle({
+  const results = await settleWithConcurrency(Array.from({ length: n }), getImageRequestConcurrency(), (_, requestIndex) => callResponsesImageApiSingle({
     ...opts,
     prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n),
     params: { ...opts.params, n: 1 },

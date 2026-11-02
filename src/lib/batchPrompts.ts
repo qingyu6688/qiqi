@@ -1,4 +1,5 @@
 export const DEFAULT_BATCH_PROMPT_CONCURRENCY = 10
+/** 读取设置前的同时请求数；应用启动后由“并发数”设置接管，见 setImageRequestConcurrency */
 export const IMAGE_REQUEST_CONCURRENCY = 2
 
 /** 批量模式下提示词之间以至少两个空行分隔；单个空行属于提示词内部（如评论段） */

@@ -12,6 +12,7 @@ import { normalizePersistedState } from './lib/persistedState'
 import { setPresetConfig } from './lib/presetConfig'
 import { FetchConnectError } from './lib/platform'
 import { flushRegisteredStorageSaves } from './lib/storageSaveState'
+import { getImageRequestConcurrency } from './lib/imageRequestQueue'
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
@@ -22,10 +23,10 @@ vi.mock('./lib/db', () => {
   return {
     CURRENT_THUMBNAIL_VERSION: 2,
     getAllTasks: async () => [...tasks.values()],
-    putTask: async (task: TaskRecord) => {
+    putTask: vi.fn(async (task: TaskRecord) => {
       tasks.set(task.id, task)
       return task.id
-    },
+    }),
     deleteTask: vi.fn(async (id: string) => {
       tasks.delete(id)
     }),
@@ -229,6 +230,97 @@ describe('画廊异步接口独立出图', () => {
   })
 })
 
+describe('生图任务的请求上限、计时与保存失败', () => {
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    vi.mocked(callImageApi).mockReset()
+    useStore.setState({
+      tasks: [], inputImages: [], maskDraft: null, batchProgress: null,
+      params: { ...DEFAULT_PARAMS }, prompt: '一张测试图',
+      reusedTaskApiProfileId: null, reusedTaskApiProfileMissing: false,
+      showToast: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    useStore.setState({ settings: normalizeSettings({}) })
+  })
+
+  it('同时请求数跟随并发数设置，关闭限制时不设上限', () => {
+    useStore.setState({ settings: normalizeSettings({ batchPromptConcurrencyLimited: true, batchPromptConcurrency: 3 }) })
+    expect(getImageRequestConcurrency()).toBe(3)
+    useStore.setState({ settings: normalizeSettings({ batchPromptConcurrencyLimited: false, batchPromptConcurrency: 3 }) })
+    expect(getImageRequestConcurrency()).toBe(Infinity)
+  })
+
+  it('单条多图从第一个请求发出开始计时，完成耗时不含排队时间', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'timing-profile', apiKey: 'mock-key' })
+    useStore.setState({ settings: normalizeSettings({ profiles: [profile], activeProfileId: profile.id }), params: { ...DEFAULT_PARAMS, n: 2 } })
+    const now = vi.spyOn(Date, 'now')
+    vi.mocked(callImageApi).mockImplementationOnce(async (opts) => {
+      now.mockReturnValue(1000)
+      opts.onRequestStarted?.()
+      now.mockReturnValue(5000)
+      opts.onRequestStarted?.()
+      now.mockReturnValue(9000)
+      return { images: ['data:image/png;base64,first', 'data:image/png;base64,second'] }
+    })
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+    const task = useStore.getState().tasks[0]
+    expect(task.startedAt).toBe(1000)
+    expect(task.elapsed).toBe(8000)
+  })
+
+  it('任务记录保存失败时标记失败且不发送请求，保留输入内容', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'save-fail-profile', apiKey: 'mock-key' })
+    useStore.setState({ settings: normalizeSettings({ profiles: [profile], activeProfileId: profile.id, clearInputAfterSubmit: true }), prompt: '保存失败的任务' })
+    vi.mocked(putDbTask).mockRejectedValueOnce(new Error('磁盘已满'))
+    await submitTask()
+    const task = useStore.getState().tasks[0]
+    expect(task.status).toBe('error')
+    expect(task.error).toContain('任务记录保存失败，未发送生图请求：磁盘已满')
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(useStore.getState().showToast).toHaveBeenCalledWith(expect.stringContaining('任务记录保存失败'), 'error')
+    expect(useStore.getState().prompt).toBe('保存失败的任务')
+  })
+
+  it('批量中单条任务保存失败时计入失败，其余提示词照常执行', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'batch-save-fail-profile', apiKey: 'mock-key' })
+    useStore.setState({
+      settings: normalizeSettings({ profiles: [profile], activeProfileId: profile.id, showBatchPrompt: true, batchPromptEnabled: true, batchPromptMode: 'queue' }),
+      prompt: '圣诞树\n\n\n姜饼人',
+    })
+    vi.mocked(putDbTask).mockRejectedValueOnce(new Error('磁盘已满'))
+    vi.mocked(callImageApi).mockResolvedValue({ images: ['data:image/png;base64,output'] })
+    await submitTask()
+    const tasks = useStore.getState().tasks
+    expect(tasks.map((item) => item.status).sort()).toEqual(['done', 'error'])
+    expect(callImageApi).toHaveBeenCalledTimes(1)
+    expect(useStore.getState().batchProgress).toBeNull()
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('批量生成完成：成功 1 条，失败 1 条', 'error')
+  })
+
+  it('重试时保存失败不发送请求，覆盖重试保留原图', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'retry-save-fail-profile', apiKey: 'mock-key' })
+    useStore.setState({ settings: normalizeSettings({ profiles: [profile], activeProfileId: profile.id, retryMode: 'overwriteAll' }) })
+    await putImage({ id: 'kept-output', dataUrl: 'data:image/png;base64,kept' })
+    const source: TaskRecord = {
+      id: 'retry-source', prompt: '重试保存失败', params: { ...DEFAULT_PARAMS }, apiProvider: 'openai', apiProfileId: profile.id,
+      inputImageIds: [], maskImageId: null, outputImages: ['kept-output'], status: 'done', error: null,
+      createdAt: 1, finishedAt: 2, elapsed: 1,
+    }
+    useStore.setState({ tasks: [source] })
+    vi.mocked(putDbTask).mockRejectedValueOnce(new Error('磁盘已满'))
+    await retryTask(source)
+    expect(useStore.getState().tasks[0].status).toBe('error')
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(await getImage('kept-output')).toBeDefined()
+  })
+})
+
 describe('error toast messages', () => {
   it('尺寸适配后的图片用于展示，原图保留；删除任务时两者一并清理', async () => {
     await clearTasks()
@@ -272,13 +364,13 @@ describe('error toast messages', () => {
     expect(useStore.getState().tasks).toHaveLength(0)
   })
 
-  it('对话选择五张时执行五个独立请求，模型重复提交不会追加付费请求', async () => {
+  it('对话选择五张时按同时请求数执行五个独立请求，模型重复提交不会追加付费请求', async () => {
     await clearTasks()
     await clearImages()
     const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'mock-image-key' })
     const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiMode: 'responses', apiKey: 'mock-text-key' })
     useStore.setState({
-      settings: normalizeSettings({ profiles: [imageProfile, textProfile], activeProfileId: imageProfile.id, agentApiConfigMode: 'hybrid', agentTextProfileId: textProfile.id, agentImageProfileId: imageProfile.id, agentImageCount: 5 }),
+      settings: normalizeSettings({ profiles: [imageProfile, textProfile], activeProfileId: imageProfile.id, agentApiConfigMode: 'hybrid', agentTextProfileId: textProfile.id, agentImageProfileId: imageProfile.id, agentImageCount: 5, batchPromptConcurrency: 2 }),
       appMode: 'agent', tasks: [], inputImages: [], maskDraft: null, batchProgress: null,
       params: { ...DEFAULT_PARAMS }, prompt: '五张不同的圣诞纹样',
       agentConversations: [], activeAgentConversationId: null, agentInputDrafts: {}, agentEditingRoundId: null,
