@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type CSSProperties, type ReactNode } from 'react'
+import { useState, useRef, useEffect, useId, type CSSProperties, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { DEFAULT_DROPDOWN_MAX_HEIGHT } from '../lib/dropdown'
 import { ChevronDownIcon, EditIcon, PlusIcon, TrashIcon, DragHandleIcon } from './icons'
@@ -32,10 +32,13 @@ interface SelectProps {
   prefix?: ReactNode
   /** 追加到下拉菜单的类名，如 min-w-max 让菜单宽于触发器 */
   menuClassName?: string
+  ariaLabel?: string
 }
 
-export default function Select({ value, onChange, onReorder, options, disabled, className, onOpenChange, showValueTooltips = false, prefix, menuClassName }: SelectProps) {
+export default function Select({ value, onChange, onReorder, options, disabled, className, onOpenChange, showValueTooltips = false, prefix, menuClassName, ariaLabel }: SelectProps) {
   const [isOpen, setIsOpen] = useState(false)
+  const [highlightedIndex, setHighlightedIndex] = useState(-1)
+  const menuId = useId()
   const [menuMaxHeight, setMenuMaxHeight] = useState(DEFAULT_DROPDOWN_MAX_HEIGHT)
   const [placement, setPlacement] = useState<'bottom' | 'top'>('bottom')
   const [draggedValue, setDraggedValue] = useState<string | number | null>(null)
@@ -68,6 +71,12 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
   }
 
   const selectedOption = options.find((o) => o.value === value)
+
+  useEffect(() => {
+    if (isOpen && highlightedIndex >= 0) {
+      document.getElementById(`${menuId}-${highlightedIndex}`)?.scrollIntoView?.({ block: 'nearest' })
+    }
+  }, [isOpen, highlightedIndex, menuId])
 
   useEffect(() => {
     return () => {
@@ -166,7 +175,7 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
     if (disabled) return
     e.preventDefault()
     e.stopPropagation()
-    // 动画和位置的计算在 useEffect 中进行，这里可以先假设一个默认值或保留当前状态
+    setHighlightedIndex(Math.max(0, options.findIndex((option) => option.value === value)))
     setIsOpen(!isOpen)
   }
 
@@ -188,13 +197,52 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
     <div ref={containerRef} className="relative w-full">
       <div
         ref={triggerRef}
+        role="combobox"
+        tabIndex={disabled ? -1 : 0}
+        aria-label={ariaLabel}
+        aria-disabled={disabled || undefined}
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
+        aria-controls={isOpen ? menuId : undefined}
+        aria-activedescendant={isOpen && highlightedIndex >= 0 ? `${menuId}-${highlightedIndex}` : undefined}
+        onKeyDown={(e) => {
+          if (disabled) return
+          if (e.key === 'Tab') {
+            setIsOpen(false)
+            return
+          }
+          if (e.key === 'Escape') {
+            if (!isOpen) return
+            e.preventDefault()
+            e.stopPropagation()
+            setIsOpen(false)
+            return
+          }
+          if (!['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter', ' '].includes(e.key) || options.length === 0) return
+          e.preventDefault()
+          e.stopPropagation()
+          triggerTooltip.dismiss()
+          if (!isOpen) {
+            const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value))
+            setHighlightedIndex(e.key === 'Home' ? 0 : e.key === 'End' ? options.length - 1 : selectedIndex)
+            setIsOpen(true)
+            return
+          }
+          if (e.key === 'Enter' || e.key === ' ') {
+            const option = options[highlightedIndex]
+            if (option) onChange(option.value)
+            setIsOpen(false)
+            return
+          }
+          setHighlightedIndex((index) => e.key === 'Home' ? 0 : e.key === 'End' ? options.length - 1 : Math.max(0, Math.min(options.length - 1, index + (e.key === 'ArrowDown' ? 1 : -1))))
+        }}
         {...(showValueTooltips ? triggerTooltip.handlers : {})}
         onClick={(e) => {
           if (showValueTooltips) triggerTooltip.handlers.onClick?.()
           handleToggle(e)
           triggerTooltip.dismiss()
         }}
-        className={`flex items-center justify-between gap-1 w-full cursor-pointer select-none ${className ?? ''} ${
+        className={`flex items-center justify-between gap-1 w-full cursor-pointer select-none focus-visible:ring-2 focus-visible:ring-blue-500/60 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900 ${className ?? ''} ${
           disabled ? '!opacity-50 !cursor-not-allowed !bg-gray-100/50 dark:!bg-white/[0.05]' : ''
         }`}
       >
@@ -209,14 +257,20 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
 
       {isOpen && (
         <div
+          id={menuId}
+          role="listbox"
+          aria-label={ariaLabel}
           className={`absolute z-50 w-full overflow-hidden overflow-y-auto rounded-xl border border-transparent bg-white/95 shadow-[0_8px_30px_rgb(0,0,0,0.12)] ring-1 ring-black/5 backdrop-blur-xl dark:bg-gray-800/95 dark:shadow-[0_8px_30px_rgb(0,0,0,0.4)] dark:ring-white/[0.06] custom-scrollbar ${menuClassName ?? ''} ${
             placement === 'top' ? 'bottom-full mb-1.5 animate-dropdown-up' : 'top-full mt-1.5 animate-dropdown-down'
           }`}
           style={{ maxHeight: menuMaxHeight }}
         >
-          {options.map((option) => (
+          {options.map((option, index) => (
             <div
               key={option.value}
+              id={`${menuId}-${index}`}
+              role="option"
+              aria-selected={option.value === value}
               data-option-value={String(option.value)}
               draggable={option.draggable}
               onDragStart={(e) => {
@@ -395,10 +449,14 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
                 e.preventDefault()
                 onChange(option.value)
                 setIsOpen(false)
+                triggerRef.current?.focus({ preventScroll: true })
                 clearOptionTooltipTimer()
                 setHoveredOptionTooltip(null)
               }}
-              onMouseEnter={() => showValueTooltips && setHoveredOptionTooltip(option.value)}
+              onMouseEnter={() => {
+                setHighlightedIndex(index)
+                if (showValueTooltips) setHoveredOptionTooltip(option.value)
+              }}
               onMouseLeave={() => {
                 clearOptionTooltipTimer()
                 setHoveredOptionTooltip(null)
@@ -417,6 +475,8 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
                   ? 'font-semibold text-red-600 hover:bg-red-500/[0.1] dark:text-red-400/90 dark:hover:bg-red-500/[0.16]'
                   : option.value === value
                   ? 'bg-black/[0.05] dark:bg-white/[0.08] text-blue-600 dark:text-blue-400 font-medium'
+                  : highlightedIndex === index
+                  ? 'text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-white/[0.06]'
                   : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-white/[0.06]'
               }`}
             >

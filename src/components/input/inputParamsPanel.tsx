@@ -277,10 +277,20 @@ export default function InputParamsPanel({
         />
       </div>
       {agentMode ? (
-        <select value={String(agentImageCount)} aria-label="对话生图数量" onChange={(event) => onAgentImageCountChange(event.target.value === 'auto' ? 'auto' : Number(event.target.value))} className={`${CHIP_CLASS} cursor-pointer text-xs outline-none`}>
-          <option value="auto">自动（最多10张）</option>
-          {Array.from({ length: 10 }, (_, index) => <option key={index + 1} value={index + 1}>数量 {index + 1}</option>)}
-        </select>
+        <div className="relative max-sm:flex-auto sm:shrink-0">
+          <Select
+            value={agentImageCount}
+            ariaLabel="对话生图数量"
+            onChange={(value) => onAgentImageCountChange(value === 'auto' ? 'auto' : Number(value))}
+            options={[
+              { label: '自动（最多10张）', value: 'auto' },
+              ...Array.from({ length: 10 }, (_, index) => ({ label: `${index + 1} 张`, value: index + 1 })),
+            ]}
+            prefix={prefix('数量')}
+            menuClassName="min-w-max"
+            className={CHIP_CLASS}
+          />
+        </div>
       ) : <label
         className={`relative flex items-center max-sm:flex-auto sm:shrink-0 ${agentAutoImageCount ? CHIP_DISABLED_CLASS : `${CHIP_CLASS} cursor-text`}`}
         onMouseEnter={() => { showAgentNHint(); streamConcurrentHint.show() }}
