@@ -6,6 +6,7 @@ import { getActiveAgentRounds, getAgentBranchLeafId, getAgentRoundPath, getConve
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
 import { getImageComments, getPromptMentionParts } from '../lib/promptImageMentions'
 import { replaceAgentPromptImageReferencesForApi } from '../lib/agentImageReferences'
+import { formatApiErrorMessage } from '../lib/imageApiShared'
 import { copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 import type { AgentWebSearchStatus } from '../lib/agentWebSearch'
 import { getAgentAssistantBlocks, getAgentAssistantCopyContent, getRoundTaskSlots } from '../lib/agentAssistantBlocks'
@@ -779,6 +780,8 @@ export default function AgentWorkspace() {
               const renderedMessages = activeMessages.map((message) => {
                 const round = conversation.rounds.find((item) => item.id === message.roundId)
                 const isAssistant = message.role === 'assistant'
+                const requestError = isAssistant && round?.status === 'error' && message.content.startsWith('请求失败：')
+                  ? formatApiErrorMessage(message.content.replace(/^请求失败：/, '')) : null
                 const isStreamingAssistant = isAssistant && round?.status === 'running'
                 const isEditing = !isAssistant && round?.id === agentEditingRoundId
                 const siblingRounds = !isAssistant && round ? getAgentSiblingRounds(conversation, round) : []
@@ -835,10 +838,10 @@ export default function AgentWorkspace() {
                         className="-m-2 flex cursor-copy select-text flex-col rounded-xl p-2 transition-colors hover:bg-red-500/[0.1] dark:hover:bg-red-500/[0.16]"
                         title="点击复制完整报错"
                         onPointerDown={handleErrorCopyPointerDown}
-                        onClick={(e) => handleErrorCopyClick(e, message.content)}
+                        onClick={(e) => handleErrorCopyClick(e, `请求失败：${requestError}`)}
                       >
                         {(() => {
-                          const content = message.content.replace(/^请求失败：/, '');
+                          const content = requestError ?? '';
                           const [mainErr, ...hints] = content.split('\n提示：');
                           return (
                             <>
@@ -912,7 +915,7 @@ export default function AgentWorkspace() {
                         <TaskCard task={task} disableSwipe onClick={() => setDetailTaskId(task.id)} onReuse={() => handleReuse(task)} onEditOutputs={() => editOutputs(task)} onDelete={() => setConfirmDialog({ title: '删除任务', message: '确定要删除这个任务吗？', action: () => removeTask(task) })} />
                       </div>
                     ))}
-                    {isAssistant && round && <AgentRoundProgress round={round} tasks={tasksForRound} hasContent={Boolean(message.content.trim())} />}
+                    {isAssistant && round && <AgentRoundProgress round={round} tasks={tasksForRound} hasContent={Boolean(message.content.trim())} retryDisabled={conversation.rounds.some((item) => item.status === 'running')} onRetry={() => void regenerateAgentAssistantMessage(conversation.id, round.id)} />}
                       </article>
 
                     {!isStreamingAssistant && <div className={`mt-2 flex w-full min-w-fit items-center justify-between gap-3 px-1 transition-opacity duration-200 ${isEditing || hasBranches ? 'opacity-100' : 'opacity-100 lg:opacity-0 lg:group-hover:opacity-100'}`} onClick={e => e.stopPropagation()}>

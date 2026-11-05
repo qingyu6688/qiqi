@@ -3,6 +3,21 @@ import { DEFAULT_PARAMS } from '../types'
 import { createDefaultOpenAIProfile, DEFAULT_SETTINGS } from './apiProfiles'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments } from './agentApi'
 
+it.each([false, true])('对话接口返回 504 时给出中文说明且不自动重发，流式=%s', async (streamImages) => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('<html><title>504 Gateway Time-out</title><body>openresty</body></html>', { status: 504 }))
+  try {
+    await expect(callAgentResponsesApi({
+      settings: { ...DEFAULT_SETTINGS, agentApiConfigMode: 'hybrid' },
+      profile: createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses', streamImages }),
+      params: DEFAULT_PARAMS,
+      input: '重新设计参考图中的元素',
+    })).rejects.toThrow('接口网关等待上游响应超时（HTTP 504）')
+    expect(fetchMock).toHaveBeenCalledOnce()
+  } finally {
+    fetchMock.mockRestore()
+  }
+})
+
 describe('parseBatchImageCallArguments', () => {
   it('trims ids and prompts, fills missing ids, and skips empty prompts', () => {
     expect(parseBatchImageCallArguments(JSON.stringify({ images: [

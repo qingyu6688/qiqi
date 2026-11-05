@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AgentRound, TaskRecord } from '../types'
 
-export default function AgentRoundProgress({ round, tasks, hasContent = false }: { round: AgentRound; tasks: TaskRecord[]; hasContent?: boolean }) {
+export default function AgentRoundProgress({ round, tasks, hasContent = false, onRetry, retryDisabled = false }: { round: AgentRound; tasks: TaskRecord[]; hasContent?: boolean; onRetry?: () => void; retryDisabled?: boolean }) {
   const [now, setNow] = useState(Date.now)
   const running = round.status === 'running'
   useEffect(() => {
@@ -52,6 +52,11 @@ export default function AgentRoundProgress({ round, tasks, hasContent = false }:
       </>}
       {round.contextNotice && <p className="leading-relaxed">{round.contextNotice}</p>}
       {running && elapsed >= 90 && <p>接口处理较慢，请稍候；已完成的图片会保留。</p>}
+      {round.status === 'error' && !stopped && tasks.length === 0 && round.outputTaskIds.length === 0 && onRetry && (
+        <button type="button" onClick={onRetry} disabled={retryDisabled} className="rounded-lg bg-blue-500/10 px-3 py-2 font-medium text-blue-600 transition-colors hover:bg-blue-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400">
+          重试本轮
+        </button>
+      )}
     </div>
   )
 }

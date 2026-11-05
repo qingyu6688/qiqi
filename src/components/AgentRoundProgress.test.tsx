@@ -56,3 +56,28 @@ it('主动停止不计为接口失败', async () => {
   expect(container.textContent).toContain('已停止 1 张')
   expect(container.textContent).not.toContain('失败')
 })
+
+it('未提交图片任务的失败轮次显示手动重试，点击前不重发', async () => {
+  const onRetry = vi.fn()
+  const failed = { ...round, status: 'error' as const, error: 'HTTP 504', finishedAt: 74000 }
+  await act(async () => root.render(<AgentRoundProgress round={failed} tasks={[]} onRetry={onRetry} />))
+  expect(onRetry).not.toHaveBeenCalled()
+  expect(container.textContent).toContain('总用时 1分14秒')
+  const button = container.querySelector('button')!
+  expect(button.textContent).toBe('重试本轮')
+  act(() => button.click())
+  expect(onRetry).toHaveBeenCalledOnce()
+  await act(async () => root.render(<AgentRoundProgress round={failed} tasks={[]} onRetry={onRetry} retryDisabled />))
+  act(() => container.querySelector('button')!.click())
+  expect(onRetry).toHaveBeenCalledOnce()
+})
+
+it('运行中、主动停止和已有图片任务时使用原任务操作，不显示整轮重试按钮', async () => {
+  const onRetry = vi.fn()
+  for (const current of [round, { ...round, status: 'error' as const, error: '已停止生成。' }, { ...round, status: 'error' as const, outputTaskIds: ['saved'] }]) {
+    await act(async () => root.render(<AgentRoundProgress round={current} tasks={[]} onRetry={onRetry} />))
+    expect(container.querySelector('button')).toBeNull()
+  }
+  await act(async () => root.render(<AgentRoundProgress round={{ ...round, status: 'error' }} tasks={[task('saved', 'done')]} onRetry={onRetry} />))
+  expect(container.querySelector('button')).toBeNull()
+})

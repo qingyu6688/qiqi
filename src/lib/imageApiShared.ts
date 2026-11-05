@@ -204,24 +204,47 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
   return blobToDataUrl(blob, fallbackMime)
 }
 
-export async function getApiErrorMessage(response: Response): Promise<string> {
-  let errorMsg = `HTTP ${response.status}`
-  const textResponse = response.clone()
-  try {
-    const errJson = await response.json()
-    if (errJson.error?.message) errorMsg = errJson.error.message
-    else if (typeof errJson.detail === 'string') errorMsg = errJson.detail
-    else if (Array.isArray(errJson.detail)) errorMsg = errJson.detail.map((item: unknown) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
-    else if (typeof errJson.error === 'string') errorMsg = errJson.error
-    else if (errJson.message) errorMsg = errJson.message
-  } catch {
-    try {
-      errorMsg = await textResponse.text()
-    } catch {
-      /* ignore */
-    }
+/** 历史记录也可能含网关 HTML，显示时沿用同一规则，不改写已保存的对话。 */
+export function formatApiErrorMessage(message: string, status?: number): string {
+  const text = message.trim()
+  const html = /<(?:!doctype\s+html|html|head|body|title|h1)(?:\s|>)/i.test(text)
+  const embeddedStatus = text.match(/\bHTTP\s+(502|503|504|524)\b|\b(502|503|504|524)\s+(?:Gateway|Bad Gateway|Service Unavailable)\b|\berror\s+code[:\s]+(502|503|504|524)\b/i)
+  const gatewayStatus = status ?? Number(embeddedStatus?.[1] ?? embeddedStatus?.[2] ?? embeddedStatus?.[3])
+  if ([502, 503, 504, 524].includes(gatewayStatus)) {
+    const reason = gatewayStatus === 502 ? '接口网关连接上游失败'
+      : gatewayStatus === 503 ? '接口服务暂时不可用' : '接口网关等待上游响应超时'
+    const summary = `${reason}（HTTP ${gatewayStatus}）。`
+    if (!html && text.startsWith(summary)) return text
+    const detail = text && !html && !/^HTTP\s+\d+$/i.test(text) ? `\n服务商返回：${text}` : ''
+    return `${summary}${detail}\n提示：请稍后重试，或减少同时请求数。网关的等待上限不受本机超时设置控制；原请求可能仍在服务端处理，重试前请先确认服务商任务状态。`
   }
-  return errorMsg
+  if (html) return `接口返回了错误页面${status ? `（HTTP ${status}）` : ''}，请检查 API 地址或稍后重试。`
+  return text || (status ? `HTTP ${status}` : '接口请求失败，请稍后重试。')
+}
+
+export async function getApiErrorMessage(response: Response): Promise<string> {
+  let text: string
+  try {
+    // 只读一次响应体，避免桌面流被 clone 后额外缓存整份错误页面。
+    text = await response.text()
+  } catch {
+    return formatApiErrorMessage('', response.status)
+  }
+  let payload: unknown
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    return formatApiErrorMessage(text, response.status)
+  }
+  if (!payload || typeof payload !== 'object') return formatApiErrorMessage('', response.status)
+  const record = payload as Record<string, unknown>
+  const error = record.error && typeof record.error === 'object' ? record.error as Record<string, unknown> : null
+  const message = typeof error?.message === 'string' ? error.message
+    : typeof record.detail === 'string' ? record.detail
+    : Array.isArray(record.detail) ? record.detail.map((item: unknown) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
+    : typeof record.error === 'string' ? record.error
+    : typeof record.message === 'string' ? record.message : ''
+  return formatApiErrorMessage(message, response.status)
 }
 
 export function pickActualParams(source: unknown): Partial<TaskParams> {
