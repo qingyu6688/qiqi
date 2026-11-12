@@ -33,15 +33,15 @@ const AGENT_IMAGE_INSTRUCTIONS = [
   '',
   '## Progressive Batch Generation',
   'For multi-image requests, use a progressive batching strategy to ensure consistency:',
-  '  1. **Base Reference First:** If the images need to share a consistent style, character, or layout (e.g. PPT slides, storyboards), generate ONE primary image first to establish the visual baseline, then call continue_generation to get another round.',
-  `  2. 每批最多规划 ${MAX_AGENT_PLAN_BATCH_IMAGES} 张独立图片，先提交当前批次，收到结果后再规划后续批次。不要在一次回复中写完所有图片的长篇方案。需要共享风格时引用基础图。`,
+  '  1. 后续图片确实需要引用尚未生成的基础图时，先生成基础图。可以共用现有参考图的独立任务可以同时提交。',
+  '  2. 图片之间没有依赖时，按本轮给出的批次上限提交尽可能多的独立图片，收到结果后再规划下一批。每张只写必要的画面要求。',
   '  3. 独立图片：多张图片使用 generate_image_batch，每张图片对应 images 数组中的一个条目。五张图片必须是五个独立条目和五个独立图片文件，不能合成一张拼贴或宫格。共享风格不意味着共享一张画布。',
   'As the turn continues, output a brief progress note before each tool call.',
   'For single-image requests, generate directly without any listing.',
   '',
   '## Generating images',
   '- One image_generation call per distinct image. Never collage.',
-  '- Dependent images (a later image needs to reference an earlier one) → generate the prerequisite first, then call continue_generation. The next round will have the result available as `<ref id="..." />`.',
+  '- 需要引用前一张生成图时，先提交该图并等待结果。下一批可用引用标签附上生成结果。',
   '- Only generate when explicitly requested; otherwise reply with text.',
   '- Preserve the user\'s original intent faithfully. Never substitute requested subjects for copyright/trademark reasons.',
   '',
@@ -62,7 +62,7 @@ const AGENT_MATH_FORMATTING_INSTRUCTIONS = [
   '- Do not use LaTeX delimiters like `\\(...\\)` or `\\[...\\]` in visible assistant text.',
 ].join('\n')
 
-function createAgentInstructions(settings: AppSettings, codexCliSize?: string, remainingImageCount?: number, imageRequestBudget = MAX_AGENT_IMAGES_PER_ROUND) {
+function createAgentInstructions(settings: AppSettings, codexCliSize: string | undefined, remainingImageCount: number | undefined, imageRequestBudget: number, batchImageLimit: number) {
   const maxToolRounds = Number.isFinite(settings.agentMaxToolRounds)
     ? Math.max(1, Math.trunc(settings.agentMaxToolRounds))
     : DEFAULT_AGENT_MAX_TOOL_ROUNDS
@@ -79,9 +79,10 @@ function createAgentInstructions(settings: AppSettings, codexCliSize?: string, r
     '',
     '## Tool policy',
     `本轮最多请求 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片，目前剩余 ${imageRequestBudget} 张；失败的请求也占用数量，不要擅自补图。超出时说明需下一条消息继续。`,
+    ...(batchImageLimit > 0 ? [`本次最多规划 ${batchImageLimit} 张独立图片。互不依赖时尽量用满名额，但不要超出用户要求的数量。`] : []),
     `- Current maximum tool-use rounds for this Agent turn: ${maxToolRounds}.`,
     `- ${imageToolInstruction}`,
-    '- Call continue_generation ONLY when you have generated a prerequisite image and need another round to generate dependent images. Do NOT call it when the task is complete.',
+    ...(remainingImageCount === undefined && batchImageLimit > 0 ? ['- Call continue_generation only when the next reply still needs to generate dependent images after the prerequisite is available.'] : []),
     '- When web_search is available, use it only when current external information would improve the answer or the user asks for research/news/facts.',
     '- When the requested task is complete, stop calling tools and provide the final response.',
   ]
@@ -94,7 +95,7 @@ function createAgentInstructions(settings: AppSettings, codexCliSize?: string, r
   if (remainingImageCount !== undefined) instructions.push('', '## 图片数量',
     `用户在数量控件中选择了 ${settings.agentImageCount} 张独立图片，本轮尚可提交 ${remainingImageCount} 张。数量控件优先于提示词中含糊的数量描述。`,
     remainingImageCount > 0
-      ? `仅当用户明确要求生成或修改图片时，调用 generate_image_batch，本次提交 1–${Math.min(MAX_AGENT_PLAN_BATCH_IMAGES, remainingImageCount, imageRequestBudget)} 个独立图片条目。每条只描述一张完整作品，保留必要的参考图标签和视觉细节，省略长篇解释；收到当前批次结果后继续，直到提交完剩余 ${remainingImageCount} 张。不要拼贴，不要重复已经提交的图片。`
+      ? `仅当用户明确要求生成或修改图片时，调用 generate_image_batch，每条只描述一张完整作品，保留必要的参考图标签和视觉细节。收到当前批次结果后继续，直到提交完剩余 ${remainingImageCount} 张。不要拼贴，不要重复已经提交的图片。`
       : '本轮图片请求数量已用完。停止生成图片，直接说明结果或失败原因；不得自动重试、补图或追加图片请求。',
     '用户只聊天或询问问题时正常回复文字，不因选择了数量而自动生成图片。')
 
@@ -180,8 +181,8 @@ function createGenerateImageFunctionTool() {
   }
 }
 
-function createAgentTools(params: TaskParams, profile: ApiProfile, settings: AppSettings, maskDataUrl?: string, remainingImageCount?: number, imageRequestBudget = MAX_AGENT_IMAGES_PER_ROUND): Array<Record<string, unknown>> {
-  if (remainingImageCount === 0 || imageRequestBudget <= 0) return []
+function createAgentTools(params: TaskParams, profile: ApiProfile, settings: AppSettings, maskDataUrl: string | undefined, remainingImageCount: number | undefined, batchImageLimit: number): Array<Record<string, unknown>> {
+  if (batchImageLimit <= 0) return []
   const tools: Array<Record<string, unknown>> = remainingImageCount !== undefined ? [] : settings.agentApiConfigMode === 'hybrid'
     ? [createGenerateImageFunctionTool()]
     : [createImageTool(params, profile, maskDataUrl)]
@@ -195,7 +196,7 @@ function createAgentTools(params: TaskParams, profile: ApiProfile, settings: App
     name: 'generate_image_batch',
     description: [
       ...(remainingImageCount !== undefined ? [
-        `用户已手动选择数量，本轮还剩 ${remainingImageCount} 张。需要生图时使用本工具，每批提交 1–${Math.min(MAX_AGENT_PLAN_BATCH_IMAGES, remainingImageCount, imageRequestBudget)} 个图片条目，后续批次等待本批结果后继续；每条只描述一张完整作品，不能拼贴。数量为 1 时同样适用。`,
+        `用户已手动选择数量，本轮还剩 ${remainingImageCount} 张。每批最多 ${batchImageLimit} 张。互不依赖时尽量用满名额，后续批次等待本批结果后继续。每条只描述一张完整作品，不能拼贴。数量为 1 时同样适用。`,
       ] : [
         'Generate multiple images concurrently. Use this ONLY when:',
         '1. There are 2+ remaining images whose prerequisites (base references) are ALL already generated.',
@@ -211,7 +212,7 @@ function createAgentTools(params: TaskParams, profile: ApiProfile, settings: App
         images: {
           type: 'array',
           minItems: 1,
-          maxItems: remainingImageCount === undefined ? imageRequestBudget : Math.min(MAX_AGENT_PLAN_BATCH_IMAGES, remainingImageCount, imageRequestBudget),
+          maxItems: batchImageLimit,
           description: 'Array of images to generate concurrently.',
           items: {
             type: 'object',
@@ -621,6 +622,7 @@ interface AgentResponseOptions {
   input: unknown
   remainingImageCount?: number
   imageRequestBudget?: number
+  imageBatchConcurrency?: number
   onConnectionState?: (state: RequestConnectionState) => void
   maskDataUrl?: string
   signal?: AbortSignal
@@ -653,10 +655,12 @@ async function callAgentResponsesApiRequest(opts: AgentResponseOptions): Promise
   try {
     const remainingImageCount = opts.remainingImageCount ?? (typeof settings.agentImageCount === 'number' ? settings.agentImageCount : undefined)
     const imageRequestBudget = Math.max(0, Math.min(MAX_AGENT_IMAGES_PER_ROUND, opts.imageRequestBudget ?? MAX_AGENT_IMAGES_PER_ROUND))
-    const tools = createAgentTools(params, profile, settings, maskDataUrl, remainingImageCount, imageRequestBudget)
+    const concurrency = opts.imageBatchConcurrency ?? MAX_AGENT_PLAN_BATCH_IMAGES
+    const batchImageLimit = Math.min(concurrency, imageRequestBudget, remainingImageCount ?? imageRequestBudget)
+    const tools = createAgentTools(params, profile, settings, maskDataUrl, remainingImageCount, batchImageLimit)
     const body: Record<string, unknown> = {
       model: profile.model,
-      instructions: createAgentInstructions(settings, (imageProfile ?? profile).codexCli ? params.size : undefined, remainingImageCount, imageRequestBudget),
+      instructions: createAgentInstructions(settings, (imageProfile ?? profile).codexCli ? params.size : undefined, remainingImageCount, imageRequestBudget, batchImageLimit),
       input,
       ...(tools.length ? { tools } : {}),
       // 原生生图每次回复最多执行一次内置工具，下一次调用前由客户端重新核对本轮数量。

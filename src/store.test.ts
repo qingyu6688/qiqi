@@ -364,13 +364,23 @@ describe('error toast messages', () => {
     expect(useStore.getState().tasks).toHaveLength(0)
   })
 
-  it('兼容一次返回五个计划项的接口，按并发上限出图并直接收尾', async () => {
+  it.each([
+    { keys: 1, global: 10, expectedPeak: 2 },
+    { keys: 5, global: 3, expectedPeak: 3 },
+    { keys: 5, global: 10, expectedPeak: 5 },
+  ])('普通五张图的规划上限和实际峰值一致：$keys 个 Key、全局上限 $global', async ({ keys, global, expectedPeak }) => {
     await clearTasks()
     await clearImages()
-    const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'mock-image-key' })
+    const imageProfiles = Array.from({ length: keys }, (_, index) =>
+      createDefaultOpenAIProfile({ id: `image-profile-${index}`, apiKey: `mock-image-key-${index}` }))
+    const imageProfile = imageProfiles[0]
     const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiMode: 'responses', apiKey: 'mock-text-key' })
     useStore.setState({
-      settings: normalizeSettings({ profiles: [imageProfile, textProfile], activeProfileId: imageProfile.id, agentApiConfigMode: 'hybrid', agentTextProfileId: textProfile.id, agentImageProfileId: imageProfile.id, agentImageCount: 5, batchPromptConcurrency: 2 }),
+      settings: normalizeSettings({
+        profiles: [...imageProfiles, textProfile], activeProfileId: imageProfile.id, agentApiConfigMode: 'hybrid',
+        agentTextProfileId: textProfile.id, agentImageProfileId: imageProfile.id, agentImageQueueProfileIds: imageProfiles.slice(1).map((profile) => profile.id),
+        agentImageCount: 5, batchPromptConcurrency: global,
+      }),
       appMode: 'agent', tasks: [], inputImages: [], maskDraft: null, batchProgress: null,
       params: { ...DEFAULT_PARAMS }, prompt: '五张不同的圣诞纹样',
       agentConversations: [], activeAgentConversationId: null, agentInputDrafts: {}, agentEditingRoundId: null,
@@ -393,16 +403,17 @@ describe('error toast messages', () => {
       return { images: ['data:image/png;base64,output'] }
     })
     await submitAgentMessage()
-    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(2))
-    expect(useStore.getState().tasks.filter((item) => item.agentQueued)).toHaveLength(3)
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(expectedPeak))
+    expect(useStore.getState().tasks.filter((item) => item.agentQueued)).toHaveLength(5 - expectedPeak)
     release.resolve()
     await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.status).toBe('done'))
-    expect(peak).toBe(2)
+    expect(peak).toBe(expectedPeak)
     expect(callImageApi).toHaveBeenCalledTimes(5)
     expect(useStore.getState().tasks.filter((item) => item.status === 'done')).toHaveLength(5)
-    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].remainingImageCount).toBe(5)
+    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0]).toMatchObject({ remainingImageCount: 5, imageBatchConcurrency: expectedPeak })
     expect(callAgentResponsesApi).toHaveBeenCalledOnce()
     expect(vi.mocked(callImageApi).mock.calls.every(([request]) => request.params.n === 1)).toBe(true)
+    expect(vi.mocked(callImageApi).mock.calls.map(([request]) => request.settings.apiKey)).toEqual(Array.from({ length: 5 }, (_, index) => imageProfiles[index % keys].apiKey))
   })
 
   it('多图单张失败后继续队列，直接保留其余四张', async () => {

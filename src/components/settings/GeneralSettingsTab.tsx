@@ -151,7 +151,7 @@ export default function GeneralSettingsTab({
             </label>
           )}
           <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-            画廊、对话生图、重试和单条多图共用这个上限，超出的请求排队等待，排队时间不计入超时；批量并发提交时也按这个数量同时提交提示词。关闭限制会立即发出全部请求，容易触发服务商限流。
+            画廊、对话生图和重试共用此上限，排队时间不计入接口超时。对话生图单 Key 每批最多两张，多 Key 每批还受可用 Key 数量限制。需要依次参考上一张结果的图片会分批生成。
           </div>
         </div>
         <div className="block">

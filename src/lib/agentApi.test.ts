@@ -156,6 +156,29 @@ describe('callAgentResponsesApi', () => {
     expect(single.tools[0].description).not.toContain('2+ remaining')
   })
 
+  it.each([
+    { concurrency: 5, count: 5, remaining: undefined, budget: 10, expected: 5 },
+    { concurrency: 5, count: 5, remaining: 3, budget: 10, expected: 3 },
+    { concurrency: 3, count: 5, remaining: undefined, budget: 10, expected: 3 },
+    { concurrency: 5, count: 'auto' as const, remaining: undefined, budget: 4, expected: 4 },
+  ])('批次上限同时反映实际名额、剩余张数和轮次预算：$expected', async ({ concurrency, count, remaining, budget, expected }) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ output: [] })))
+    await callAgentResponsesApi({
+      settings: { ...DEFAULT_SETTINGS, agentApiConfigMode: 'hybrid', agentImageCount: count },
+      profile: createDefaultOpenAIProfile({ apiMode: 'responses', apiKey: 'mock-text-key' }),
+      params: DEFAULT_PARAMS,
+      input: '生成五张不同风格的猫',
+      remainingImageCount: remaining,
+      imageBatchConcurrency: concurrency,
+      imageRequestBudget: budget,
+    })
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body))
+    expect(body.instructions).toContain(`本次最多规划 ${expected} 张独立图片`)
+    expect(body.tools).toContainEqual(expect.objectContaining({
+      name: 'generate_image_batch', parameters: expect.objectContaining({ properties: { images: expect.objectContaining({ minItems: 1, maxItems: expected }) } }),
+    }))
+  })
+
   it('混合模式的多图文本规划收到 504 后仅重试一次，原生模式不重发', async () => {
     vi.useFakeTimers()
     try {

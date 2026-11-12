@@ -510,7 +510,7 @@ export default function InputParamsPanel({
             </p>
           )}
           <p className="text-[11px] leading-relaxed text-gray-400 dark:text-gray-500">
-            画廊、对话、重试和单条多图共用这个上限，超出的请求排队等待，排队时间不计入超时。
+            画廊、对话和重试共用这个上限，排队时间不计入超时。对话单 Key 每批最多两张，多 Key 每批最多同时使用每个可用 Key 一次。
           </p>
           {batchProgress && (
             <div className={ROW_CLASS}>

@@ -137,7 +137,7 @@ export default function AgentSettingsTab({
             <fieldset className="space-y-2 rounded-xl border border-black/10 p-3 dark:border-white/10" disabled={isPresetAgentFieldLocked('imageProfileId')}>
               <legend className="px-1 text-sm text-gray-600 dark:text-gray-300">多图队列 API</legend>
               <p className="text-xs leading-5 text-gray-500">
-                当前可用 {queueProfiles.length} 个 Key，含主配置。{onSaveImageQueue ? '也可在下方勾选已有的图像配置。' : '可在下方勾选支持相同模型的图像配置。'}启用多个 Key 后，每个 Key 同时处理一张，整批受并发设置限制。
+                当前可用 {queueProfiles.length} 个 Key，含主配置。{onSaveImageQueue ? '也可在下方勾选已有的图像配置。' : '可在下方勾选支持相同模型的图像配置。'}互不依赖的图片可并发生成，单 Key 每批最多两张，多 Key 每个同时处理一张，均受全局上限限制。
               </p>
               <div className="space-y-2 text-sm text-gray-700 dark:text-gray-200">
                 <div>{primary.name}（主配置）</div>

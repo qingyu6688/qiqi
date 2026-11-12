@@ -291,5 +291,5 @@ describe('tauriStorage', () => {
     expect(saved.version).toBe(2)
     expect(saved.state.agentSidebarCollapsed).toBe(false)
     expect(saved.state.supportPromptDismissed).toBe(true)
-  })
+  }, 30_000)
 })

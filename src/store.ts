@@ -2929,6 +2929,7 @@ async function executeAgentRound(
     const imageRequestSettings = createSettingsForApiProfile(requestSettings, imageProfile)
     const queueProfiles = getAgentImageQueueProfiles(requestSettings, imageProfile)
     const useMultipleKeys = queueProfiles.length > 1
+    const getBatchConcurrency = () => Math.min(useMultipleKeys ? queueProfiles.length : MAX_AGENT_PLAN_BATCH_IMAGES, getImageRequestConcurrency())
     const imageParams = normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: round.inputImageIds.length > 0 })
     const streamingTaskIds: string[] = resume ? [...round.outputTaskIds] : []
     let submittedImageCount = resume ? getAgentSubmittedImageCount(round, latestState.tasks) : 0
@@ -3377,8 +3378,7 @@ async function executeAgentRound(
       }
 
       // 排队期间不启动接口超时计时，上一张结束后再腾出请求名额。
-      const concurrency = Math.min(useMultipleKeys ? queueProfiles.length : MAX_AGENT_PLAN_BATCH_IMAGES, getImageRequestConcurrency())
-      const batchResults = await settleWithConcurrency(batchExecutionItems, concurrency, async ({ item, batchToolCallId, references, referenceIds, taskParams, taskProfile }) => {
+      const batchResults = await settleWithConcurrency(batchExecutionItems, getBatchConcurrency(), async ({ item, batchToolCallId, references, referenceIds, taskParams, taskProfile }) => {
         if (controller.signal.aborted) throw createAgentAbortError()
         const taskId = taskIdByToolCallId.get(batchToolCallId)
         if (!taskId || !useStore.getState().tasks.some((task) => task.id === taskId)) throw new Error('任务已删除，未发出图片请求')
@@ -3533,6 +3533,7 @@ async function executeAgentRound(
         params: imageParams,
         input: apiInputForTurn,
         imageRequestBudget: Math.max(0, MAX_AGENT_IMAGES_PER_ROUND - submittedImageCount),
+        imageBatchConcurrency: getBatchConcurrency(),
         ...(getRemainingImageCount() !== undefined ? { remainingImageCount: getRemainingImageCount() } : {}),
         maskDataUrl,
         signal: controller.signal,
