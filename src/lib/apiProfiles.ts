@@ -1121,7 +1121,11 @@ export function mergeImportedSettings(
   })
 
   if (options.preserveInternalIds) {
-    if (hasOnlyDefaultProfiles(current)) return imported
+    const backupPreferences = {
+      agentCustomInstructions: isRecord(importedSettings) && typeof importedSettings.agentCustomInstructions === 'string' ? imported.agentCustomInstructions : current.agentCustomInstructions,
+      galleryImageVariation: isRecord(importedSettings) && (importedSettings.galleryImageVariation === 'preserve' || importedSettings.galleryImageVariation === 'vary') ? imported.galleryImageVariation : current.galleryImageVariation,
+    }
+    if (hasOnlyDefaultProfiles(current)) return normalizeSettings({ ...imported, ...backupPreferences })
 
     const customProviders = [...current.customProviders]
     for (const provider of imported.customProviders) {
@@ -1135,11 +1139,11 @@ export function mergeImportedSettings(
       if (idx >= 0) profiles[idx] = profile
       else profiles.push(profile)
     }
-    return normalizeSettings({ ...current, customProviders, profiles, activeProfileId: current.activeProfileId })
+    return normalizeSettings({ ...current, ...backupPreferences, customProviders, profiles, activeProfileId: current.activeProfileId })
   }
 
   if (hasOnlyDefaultProfiles(current)) {
-    return imported
+    return normalizeSettings({ ...imported, agentCustomInstructions: current.agentCustomInstructions, galleryImageVariation: current.galleryImageVariation })
   }
 
   const { providers: customProviders, providerIdMap } = mergeImportedCustomProviders(current.customProviders, imported.customProviders)
