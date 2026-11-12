@@ -4,6 +4,20 @@ import { replaceImageMentionsForApi, stripImageMentionMarkers } from './promptIm
 const AGENT_ROUND_IMAGE_REFERENCE_RE = /@(?:第)?(\d+)轮图(\d+)/g
 const AGENT_REF_TAG_RE = /<ref\b[^>]*\bid=(["'])(round-(\d+)-(?:image|reference)-(\d+))\1[^>]*\/?>/g
 
+export const LOCAL_REFERENCE_BATCH_PREFIX = 'local-reference-batch-'
+
+/** 只在用户明确要求逐图生成且数量相符时，绕过文本规划。 */
+export function createAgentReferenceBatch(prompt: string, referenceCount: number, count: number | 'auto' | undefined, hasMask: boolean): Array<{ id: string; prompt: string }> | null {
+  if (hasMask || referenceCount < 2 || count !== referenceCount) return null
+  const text = stripImageMentionMarkers(prompt).trim()
+  if (/@(?:图|第?\d+轮图)|<ref\b|拼贴|拼接|合并|融合|组合|整合|对比|分析|搜索|参考历史|不要生成|不生成|无需生成|先别|[?？]/i.test(text)) return null
+  if (!/^(?:请\s*)?(?:(?:依次|分别|逐一|逐张|按顺序)\s*(?:根据|按照|参照|参考|基于|用|按)?|(?:根据|按照|参照|参考|基于|用|按))\s*(?:每一?张|各张|每个)\s*(?:上传的|参考)?\s*(?:图|图片|参考图)[^\n]*?(?:生成|制作|绘制|重绘|出图|改成)/u.test(text)) return null
+  return Array.from({ length: count }, (_, index) => ({
+    id: `reference-${index + 1}`,
+    prompt: `本任务对应第 ${index + 1} 张参考图。仅根据本请求附带的一张参考图，制作一张独立完整的图片。\n用户要求：${text}`,
+  }))
+}
+
 export function getAgentCurrentReferenceId(round: AgentRound, index: number) {
   return `round-${round.index}-reference-${index + 1}`
 }

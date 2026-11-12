@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getImageRequestConcurrency, setImageRequestConcurrency, withImageRequestSlot } from './imageRequestQueue'
+import { getImageRequestConcurrency, setImageRequestConcurrency, withImageCredentialSlot, withImageRequestSlot } from './imageRequestQueue'
 import { settleWithConcurrency } from './batchPrompts'
 
 function deferred() {
@@ -10,6 +10,26 @@ function deferred() {
 
 describe('全局生图请求队列', () => {
   afterEach(() => setImageRequestConcurrency(2))
+
+  it('同一个 Key 保持单并发，其他 Key 可同时开始，取消等待不会提交', async () => {
+    const gate = deferred()
+    const abort = new AbortController()
+    const first = vi.fn(() => gate.promise)
+    const waiting = vi.fn(async () => '第二张')
+    const other = vi.fn(async () => '另一个 Key')
+    const active = withImageCredentialSlot('mock-key-a', first)
+    const canceled = withImageCredentialSlot('mock-key-a', waiting, abort.signal)
+    const rejection = expect(canceled).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(withImageCredentialSlot('mock-key-b', other)).resolves.toBe('另一个 Key')
+    expect(first).toHaveBeenCalledOnce()
+    expect(waiting).not.toHaveBeenCalled()
+    abort.abort()
+    await rejection
+    gate.resolve()
+    await active
+    expect(waiting).not.toHaveBeenCalled()
+    await expect(withImageCredentialSlot('mock-key-a', waiting)).resolves.toBe('第二张')
+  })
 
   it('多批请求共享两个名额，保持各批返回顺序', async () => {
     let active = 0

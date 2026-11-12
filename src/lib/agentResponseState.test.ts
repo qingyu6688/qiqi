@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentConversation, AgentRound, ResponsesOutputItem, TaskRecord } from '../types'
 import { DEFAULT_PARAMS } from '../types'
+import { LOCAL_REFERENCE_BATCH_PREFIX } from './agentImageReferences'
 import {
   canonicalizeBatchFunctionCallArguments,
   countResponseToolCalls,
@@ -16,6 +17,16 @@ import {
   scrubTaskRawResponsePayloadForDeletedTasks,
   stripPersistedAgentConversations,
 } from './agentResponseState'
+
+it('本地逐图任务的工具记录留在客户端，后续 Responses 上下文不发送本地工具编号', () => {
+  const callId = LOCAL_REFERENCE_BATCH_PREFIX + 'round'
+  const output: ResponsesOutputItem[] = [
+    { type: 'function_call', name: 'generate_image_batch', call_id: callId, arguments: '{"images":[]}' },
+    { type: 'function_call_output', call_id: callId, output: '{"images":[]}' },
+    { type: 'message', content: [{ type: 'output_text', text: '已完成' }] },
+  ]
+  expect(sanitizeResponseOutputForInput(output)).toEqual([{ role: 'assistant', content: [{ type: 'output_text', text: '已完成' }] }])
+})
 
 function round(overrides: Partial<AgentRound> = {}): AgentRound {
   return {

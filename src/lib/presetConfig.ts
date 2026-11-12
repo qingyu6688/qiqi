@@ -154,5 +154,8 @@ export function enforcePresetConfigPolicy(
     activeProfileId,
     agentTextProfileId: agentSettings && presetAgent?.textProfileId !== undefined ? agentSettings.agentTextProfileId : agentTextProfileId,
     agentImageProfileId: agentSettings && presetAgent?.imageProfileId !== undefined ? agentSettings.agentImageProfileId : agentImageProfileId,
+    agentImageQueueProfileIds: isPresetAgentFieldLocked('imageProfileId')
+      ? []
+      : presetConfigOnly ? settings.agentImageQueueProfileIds?.filter((id) => profileIds.has(id)) : settings.agentImageQueueProfileIds,
   }
 }

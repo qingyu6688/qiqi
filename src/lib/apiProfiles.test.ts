@@ -10,6 +10,7 @@ import {
   createDefaultFalProfile,
   getApiProviderLabel,
   getActiveApiProfile,
+  getAgentImageQueueProfiles,
   getCustomProviderDefinition,
   findEquivalentApiProfile,
   importCustomProviderDefinitionFromJson,
@@ -31,6 +32,21 @@ afterEach(() => {
 })
 
 describe('validateApiProfile', () => {
+  it('多 Key 队列只使用不同密钥且支持主模型的配置，并保持勾选顺序', () => {
+    const primary = createDefaultOpenAIProfile({ id: 'primary', model: 'shared-image-model', apiKey: 'mock-primary' })
+    const duplicate = createDefaultOpenAIProfile({ id: 'duplicate', model: primary.model, apiKey: primary.apiKey })
+    const wrongModel = createDefaultOpenAIProfile({ id: 'wrong-model', model: 'other-model', apiKey: 'mock-wrong' })
+    const first = createDefaultOpenAIProfile({ id: 'first', model: `another-model, ${primary.model}`, selectedModel: 'another-model', apiKey: 'mock-first' })
+    const second = createDefaultOpenAIProfile({ id: 'second', model: primary.model, apiKey: 'mock-second' })
+    const settings = normalizeSettings({
+      profiles: [primary, duplicate, wrongModel, first, second], agentApiConfigMode: 'hybrid',
+      agentImageQueueProfileIds: ['second', 'duplicate', 'wrong-model', 'first', 'missing', 'first'],
+    })
+    expect(settings.agentImageQueueProfileIds).toEqual(['second', 'duplicate', 'wrong-model', 'first'])
+    expect(getAgentImageQueueProfiles(settings, primary).map((profile) => [profile.id, profile.model])).toEqual([
+      ['primary', primary.model], ['second', primary.model], ['first', primary.model],
+    ])
+  })
   it('对话数量默认自动，手动数量保持在 1–10 张并可随配置持久化', () => {
     expect(normalizeSettings({}).agentImageCount).toBe('auto')
     expect(normalizeSettings({ agentImageCount: 5 }).agentImageCount).toBe(5)

@@ -766,6 +766,9 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     agentApiConfigMode,
     agentTextProfileId,
     agentImageProfileId,
+    agentImageQueueProfileIds: Array.isArray(record.agentImageQueueProfileIds)
+      ? [...new Set(record.agentImageQueueProfileIds.filter((id): id is string => typeof id === 'string' && profiles.some((profile) => profile.id === id)))]
+      : [],
     profiles,
     activeProfileId,
   }
@@ -783,6 +786,25 @@ export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown
   if (normalized.agentApiConfigMode !== 'hybrid') return getAgentTextApiProfile(normalized)
   const profile = normalized.profiles.find((item) => item.id === normalized.agentImageProfileId)
   return profile ? resolveApiProfileModel(profile) : null
+}
+
+/** 同一队列使用相同协议和模型，防止分配到不支持当前模型的配置。 */
+export function canUseAgentImageQueueProfile(profile: ApiProfile, primary: ApiProfile): boolean {
+  return profile.id !== primary.id && profile.provider === primary.provider && profile.apiMode === primary.apiMode
+    && !isAgentTextApiProfile(profile) && splitModelList(profile.model).includes(primary.model) && !validateApiProfile(profile)
+}
+
+export function getAgentImageQueueProfiles(settings: AppSettings, primary: ApiProfile): ApiProfile[] {
+  if (settings.agentApiConfigMode !== 'hybrid') return [primary]
+  const profiles = [primary]
+  const usedKeys = new Set([primary.apiKey.trim()])
+  for (const id of settings.agentImageQueueProfileIds ?? []) {
+    const profile = settings.profiles.find((item) => item.id === id)
+    if (!profile || !canUseAgentImageQueueProfile(profile, primary) || usedKeys.has(profile.apiKey.trim())) continue
+    usedKeys.add(profile.apiKey.trim())
+    profiles.push(resolveApiProfileModel(profile, primary.model))
+  }
+  return profiles
 }
 
 export function getCustomProviderDefinition(settings: Partial<AppSettings> | unknown, provider: ApiProvider): CustomProviderDefinition | null {
@@ -1353,4 +1375,5 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   agentImageCount: 'auto',
   agentTextProfileId: null,
   agentImageProfileId: null,
+  agentImageQueueProfileIds: [],
 })

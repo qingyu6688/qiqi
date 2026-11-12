@@ -1,4 +1,4 @@
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, MAX_AGENT_IMAGES_PER_ROUND, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type RequestConnectionState, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
+import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, MAX_AGENT_IMAGES_PER_ROUND, MAX_AGENT_PLAN_BATCH_IMAGES, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type RequestConnectionState, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import { appendStreamingFormatHint, createRequestTimeoutError, getApiErrorMessage, getResponsesImageResultBase64, maybeAppendImageToolDroppedHint, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
@@ -34,7 +34,7 @@ const AGENT_IMAGE_INSTRUCTIONS = [
   '## Progressive Batch Generation',
   'For multi-image requests, use a progressive batching strategy to ensure consistency:',
   '  1. **Base Reference First:** If the images need to share a consistent style, character, or layout (e.g. PPT slides, storyboards), generate ONE primary image first to establish the visual baseline, then call continue_generation to get another round.',
-  '  2. **Batch Remaining Tasks:** Once the base reference is available, list all remaining images to be generated. The app will generate them concurrently for you. In your descriptions, explicitly instruct to reference the base image to maintain consistency.',
+  `  2. 每批最多规划 ${MAX_AGENT_PLAN_BATCH_IMAGES} 张独立图片，先提交当前批次，收到结果后再规划后续批次。不要在一次回复中写完所有图片的长篇方案。需要共享风格时引用基础图。`,
   '  3. 独立图片：多张图片使用 generate_image_batch，每张图片对应 images 数组中的一个条目。五张图片必须是五个独立条目和五个独立图片文件，不能合成一张拼贴或宫格。共享风格不意味着共享一张画布。',
   'As the turn continues, output a brief progress note before each tool call.',
   'For single-image requests, generate directly without any listing.',
@@ -94,7 +94,7 @@ function createAgentInstructions(settings: AppSettings, codexCliSize?: string, r
   if (remainingImageCount !== undefined) instructions.push('', '## 图片数量',
     `用户在数量控件中选择了 ${settings.agentImageCount} 张独立图片，本轮尚可提交 ${remainingImageCount} 张。数量控件优先于提示词中含糊的数量描述。`,
     remainingImageCount > 0
-      ? `仅当用户明确要求生成或修改图片时，调用 generate_image_batch，恰好提交 ${remainingImageCount} 个独立图片条目，每条只描述一张完整作品。不要把多张作品排进同一张图。`
+      ? `仅当用户明确要求生成或修改图片时，调用 generate_image_batch，本次提交 1–${Math.min(MAX_AGENT_PLAN_BATCH_IMAGES, remainingImageCount, imageRequestBudget)} 个独立图片条目。每条只描述一张完整作品，保留必要的参考图标签和视觉细节，省略长篇解释；收到当前批次结果后继续，直到提交完剩余 ${remainingImageCount} 张。不要拼贴，不要重复已经提交的图片。`
       : '本轮图片请求数量已用完。停止生成图片，直接说明结果或失败原因；不得自动重试、补图或追加图片请求。',
     '用户只聊天或询问问题时正常回复文字，不因选择了数量而自动生成图片。')
 
@@ -110,6 +110,7 @@ const AGENT_TITLE_INSTRUCTIONS = [
 ].join('\n')
 
 const AGENT_TITLE_MAX_LENGTH = 28
+const AGENT_PLAN_RETRY_DELAY_MS = 2_000
 
 function createHeaders(profile: ApiProfile): Record<string, string> {
   return {
@@ -194,7 +195,7 @@ function createAgentTools(params: TaskParams, profile: ApiProfile, settings: App
     name: 'generate_image_batch',
     description: [
       ...(remainingImageCount !== undefined ? [
-        `用户已手动选择数量。需要生图时使用本工具，恰好提交 ${remainingImageCount} 个图片条目；每条只描述一张完整作品，不能拼贴。数量为 1 时同样适用。`,
+        `用户已手动选择数量，本轮还剩 ${remainingImageCount} 张。需要生图时使用本工具，每批提交 1–${Math.min(MAX_AGENT_PLAN_BATCH_IMAGES, remainingImageCount, imageRequestBudget)} 个图片条目，后续批次等待本批结果后继续；每条只描述一张完整作品，不能拼贴。数量为 1 时同样适用。`,
       ] : [
         'Generate multiple images concurrently. Use this ONLY when:',
         '1. There are 2+ remaining images whose prerequisites (base references) are ALL already generated.',
@@ -209,7 +210,8 @@ function createAgentTools(params: TaskParams, profile: ApiProfile, settings: App
       properties: {
         images: {
           type: 'array',
-          ...(remainingImageCount !== undefined ? { minItems: remainingImageCount, maxItems: remainingImageCount } : { minItems: 1, maxItems: imageRequestBudget }),
+          minItems: 1,
+          maxItems: remainingImageCount === undefined ? imageRequestBudget : Math.min(MAX_AGENT_PLAN_BATCH_IMAGES, remainingImageCount, imageRequestBudget),
           description: 'Array of images to generate concurrently.',
           items: {
             type: 'object',
@@ -665,18 +667,35 @@ async function callAgentResponsesApiRequest(opts: AgentResponseOptions): Promise
       body.stream = true
     }
 
-    const response = await apiFetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
-      method: 'POST',
-      headers: createHeaders(profile),
-      cache: 'no-store',
-      body: JSON.stringify(body),
-      signal: controller.signal,
-      onConnectionState: opts.onConnectionState,
-    })
-
-    if (!response.ok) {
+    // 混合模式的图片工具由客户端执行；仅重试尚未返回工具的文本网关错误，不重发服务端生图或搜索。
+    const maxRequestAttempts = settings.agentApiConfigMode === 'hybrid' && !settings.agentWebSearch
+      && typeof settings.agentImageCount === 'number' && settings.agentImageCount > 1 && (remainingImageCount ?? 0) > 0 ? 2 : 1
+    let response: Response
+    for (let attempt = 1; ; attempt += 1) {
+      response = await apiFetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+        method: 'POST',
+        headers: createHeaders(profile),
+        cache: 'no-store',
+        body: JSON.stringify(body),
+        signal: controller.signal,
+        onConnectionState: opts.onConnectionState,
+      })
+      if (response.ok) break
       const errorMessage = await getApiErrorMessage(response)
-      throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
+      throwIfAborted(controller.signal, signal)
+      if (attempt >= maxRequestAttempts || ![502, 503, 504, 524].includes(response.status)) {
+        throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
+      }
+      opts.onConnectionState?.({ stage: 'retrying', attempt: attempt + 1, maxAttempts: maxRequestAttempts, retryReason: 'gateway' })
+      await new Promise<void>((resolve, reject) => {
+        const cancel = () => { clearTimeout(timer); reject(controller.signal.reason) }
+        const timer = setTimeout(() => {
+          controller.signal.removeEventListener('abort', cancel)
+          resolve()
+        }, AGENT_PLAN_RETRY_DELAY_MS)
+        controller.signal.addEventListener('abort', cancel, { once: true })
+        if (controller.signal.aborted) cancel()
+      })
     }
 
     if (profile.streamImages && isEventStreamResponse(response)) {

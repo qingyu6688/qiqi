@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { AgentRound, TaskRecord } from '../types'
 import { DEFAULT_PARAMS } from '../types'
 import { getSelectedImageMentionLabel, getSelectedTextMentionLabel } from './promptImageMentions'
-import { extractAgentReferenceIds, replaceAgentPromptImageReferencesForApi, resolveAgentPromptImageReferences } from './agentImageReferences'
+import { createAgentReferenceBatch, extractAgentReferenceIds, replaceAgentPromptImageReferencesForApi, resolveAgentPromptImageReferences } from './agentImageReferences'
 
 const round = (patch: Partial<AgentRound>): AgentRound => ({
   id: patch.id ?? `round-${patch.index ?? 1}`,
@@ -35,6 +35,14 @@ const task = (id: string, outputImages: string[]): TaskRecord => ({
 })
 
 describe('agent image references', () => {
+  it('只把明确的一图对应一张成图请求拆进本地队列', () => {
+    const text = '依次根据每张图里面的毛毯图案生成相似风格不同款式'
+    expect(createAgentReferenceBatch(text, 5, 5, false)?.map((item) => item.id)).toEqual(['reference-1', 'reference-2', 'reference-3', 'reference-4', 'reference-5'])
+    expect(createAgentReferenceBatch(text, 5, 4, false)).toBeNull()
+    expect(createAgentReferenceBatch(text, 5, 5, true)).toBeNull()
+    expect(createAgentReferenceBatch('参考每张图，合并成一张作品', 5, 5, false)).toBeNull()
+    expect(createAgentReferenceBatch('参考每张图，分析如何生成五张作品', 5, 5, false)).toBeNull()
+  })
   it('extracts generated and current input XML reference ids', () => {
     expect(extractAgentReferenceIds('参考 <ref id="round-1-image-2" /> 和 <ref id="round-3-reference-1" />')).toEqual([
       'round-1-image-2',

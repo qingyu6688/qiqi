@@ -134,14 +134,15 @@ describe('callBatchImageSingle', () => {
 })
 
 describe('callAgentResponsesApi', () => {
-  it('手动选择五张时只提供五项批量图像工具；数量用完后不再提供生图工具', async () => {
+  it('手动选择五张时分批规划；数量用完后不再提供生图工具', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ output: [] }), { headers: { 'Content-Type': 'application/json' } }))
     const profile = createDefaultOpenAIProfile({ apiMode: 'responses', apiKey: 'mock-text-key' })
     const settings = { ...DEFAULT_SETTINGS, agentImageCount: 5 }
     await callAgentResponsesApi({ settings, profile, params: DEFAULT_PARAMS, input: '画五张不同的图' })
     const first = JSON.parse(String(fetchMock.mock.calls[0][1]?.body))
     expect(first.tools).toHaveLength(1)
-    expect(first.tools[0]).toMatchObject({ name: 'generate_image_batch', parameters: { properties: { images: { minItems: 5, maxItems: 5 } } } })
+    expect(first.tools[0]).toMatchObject({ name: 'generate_image_batch', parameters: { properties: { images: { minItems: 1, maxItems: 2 } } } })
+    expect(first.instructions).toContain('提交完剩余 5 张')
     expect(first.instructions).toContain('五个独立条目和五个独立图片文件')
     expect(first.instructions).toContain('用户只聊天或询问问题时正常回复文字')
     await callAgentResponsesApi({ settings, profile, params: DEFAULT_PARAMS, input: '继续', remainingImageCount: 0 })
@@ -153,6 +154,32 @@ describe('callAgentResponsesApi', () => {
     expect(single.tools[0]).toMatchObject({ name: 'generate_image_batch', parameters: { properties: { images: { minItems: 1, maxItems: 1 } } } })
     expect(single.tools[0].description).toContain('数量为 1 时同样适用')
     expect(single.tools[0].description).not.toContain('2+ remaining')
+  })
+
+  it('混合模式的多图文本规划收到 504 后仅重试一次，原生模式不重发', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchMock = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response('504 Gateway Time-out', { status: 504 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ output: [] })))
+        .mockResolvedValueOnce(new Response('504 Gateway Time-out', { status: 504 }))
+      const onConnectionState = vi.fn()
+      const opts = {
+        profile: createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses' }),
+        params: DEFAULT_PARAMS,
+        input: '生成五张海报',
+        onConnectionState,
+      }
+      const pending = callAgentResponsesApi({ ...opts, settings: { ...DEFAULT_SETTINGS, agentApiConfigMode: 'hybrid', agentImageCount: 5 } })
+      await vi.advanceTimersByTimeAsync(2000)
+      await expect(pending).resolves.toMatchObject({ outputItems: [] })
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(onConnectionState).toHaveBeenCalledWith({ stage: 'retrying', attempt: 2, maxAttempts: 2, retryReason: 'gateway' })
+      await expect(callAgentResponsesApi({ ...opts, settings: { ...DEFAULT_SETTINGS, agentApiConfigMode: 'native' } })).rejects.toThrow('HTTP 504')
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('混合模式使用独立文本 Key 发送历史文字和参考图，并接收纯文本回复', async () => {

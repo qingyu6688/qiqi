@@ -143,7 +143,7 @@ vi.mock('./lib/browserNotification', async (importOriginal) => ({
 import { showBrowserNotification } from './lib/browserNotification'
 import { clearAgentConversations, clearImages, clearTasks, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getImage, getStoredImageThumbnail, putAgentConversation, putImage, putImageThumbnail, putTask as putDbTask } from './lib/db'
 import { callImageApi } from './lib/api'
-import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
+import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { fitOutputImage } from './lib/outputImageSize'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
@@ -364,7 +364,7 @@ describe('error toast messages', () => {
     expect(useStore.getState().tasks).toHaveLength(0)
   })
 
-  it('对话选择五张时按同时请求数执行五个独立请求，模型重复提交不会追加付费请求', async () => {
+  it('兼容一次返回五个计划项的接口，按并发上限出图并直接收尾', async () => {
     await clearTasks()
     await clearImages()
     const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'mock-image-key' })
@@ -401,11 +401,11 @@ describe('error toast messages', () => {
     expect(callImageApi).toHaveBeenCalledTimes(5)
     expect(useStore.getState().tasks.filter((item) => item.status === 'done')).toHaveLength(5)
     expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].remainingImageCount).toBe(5)
-    expect(vi.mocked(callAgentResponsesApi).mock.calls[1][0].remainingImageCount).toBe(0)
+    expect(callAgentResponsesApi).toHaveBeenCalledOnce()
     expect(vi.mocked(callImageApi).mock.calls.every(([request]) => request.params.n === 1)).toBe(true)
   })
 
-  it('多图单张失败后继续队列，后续文字回复失败仍保留其余四张', async () => {
+  it('多图单张失败后继续队列，直接保留其余四张', async () => {
     await clearTasks()
     await clearImages()
     const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'mock-image-key' })
@@ -424,13 +424,100 @@ describe('error toast messages', () => {
       .mockRejectedValueOnce(new Error('接口限流'))
       .mockResolvedValue({ images: ['data:image/png;base64,retained'] })
     await submitAgentMessage()
-    await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.status).toBe('error'))
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.status).toBe('done'))
+    expect(callAgentResponsesApi).toHaveBeenCalledOnce()
     expect(callImageApi).toHaveBeenCalledTimes(5)
     expect(useStore.getState().tasks.filter((item) => item.status === 'done' && item.outputImages.length === 1)).toHaveLength(4)
     expect(useStore.getState().tasks.filter((item) => item.status === 'error')).toHaveLength(1)
     const conversation = useStore.getState().agentConversations[0]
     expect(conversation.rounds[0].outputTaskIds).toHaveLength(5)
     expect((await getAllTasks()).filter((item) => item.outputImages.length)).toHaveLength(4)
+  })
+
+  it.each([1, 5])('五张参考图直接进入生图队列，每项只带对应图片，使用 %s 个 Key', async (keyCount) => {
+    await clearTasks()
+    await clearImages()
+    const imageProfiles = Array.from({ length: keyCount }, (_, index) => createDefaultOpenAIProfile({ id: `queue-${index}`, apiKey: `mock-image-${index}`, model: 'gpt-image-2.6-sunburst' }))
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-queue', apiMode: 'responses', apiKey: 'mock-text-key' })
+    const inputImages = Array.from({ length: 5 }, (_, index) => ({ id: `reference-${index}`, dataUrl: `data:image/png;base64,reference-${index}` }))
+    for (const input of inputImages) await putImage({ ...input, source: 'upload', createdAt: 1 })
+    useStore.setState({
+      settings: normalizeSettings({
+        profiles: [...imageProfiles, textProfile], activeProfileId: imageProfiles[0].id, agentApiConfigMode: 'hybrid',
+        agentTextProfileId: textProfile.id, agentImageProfileId: imageProfiles[0].id,
+        agentImageQueueProfileIds: imageProfiles.slice(1).map((profile) => profile.id),
+        agentImageCount: 5, batchPromptConcurrency: 5,
+      }),
+      appMode: 'agent', tasks: [], inputImages, maskDraft: null, batchProgress: null,
+      params: { ...DEFAULT_PARAMS, quality: 'high' }, prompt: '依次根据每张图里面的毛毯图案生成相似风格不同款式',
+      agentConversations: [], activeAgentConversationId: null, agentInputDrafts: {}, agentEditingRoundId: null, showToast: vi.fn(),
+    })
+    vi.mocked(callAgentConversationTitleApi).mockClear()
+    vi.mocked(callAgentResponsesApi).mockReset()
+    const release = deferred<void>()
+    const runningCount = keyCount === 5 ? 5 : 2
+    vi.mocked(callImageApi).mockReset().mockImplementation(async (request) => {
+      request.onRequestStarted?.()
+      await release.promise
+      if (request.inputImageDataUrls[0] === inputImages[1].dataUrl) throw new Error('接口网关等待上游响应超时（HTTP 504）')
+      return { images: [`data:image/png;base64,output-for-${request.inputImageDataUrls[0]}`] }
+    })
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(runningCount))
+    expect(useStore.getState().tasks.filter((task) => task.agentQueued)).toHaveLength(5 - runningCount)
+    release.resolve()
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.status).toBe('done'))
+    expect(callAgentResponsesApi).not.toHaveBeenCalled()
+    expect(callAgentConversationTitleApi).not.toHaveBeenCalled()
+    expect(callImageApi).toHaveBeenCalledTimes(5)
+    for (const [index, [request]] of vi.mocked(callImageApi).mock.calls.entries()) {
+      expect(request.inputImageDataUrls).toEqual([inputImages[index].dataUrl])
+      expect(request.settings.apiKey).toBe(imageProfiles[index % keyCount].apiKey)
+      expect(request.params).toMatchObject({ n: 1, quality: 'high' })
+    }
+    const { tasks, agentConversations } = useStore.getState()
+    const ordered = agentConversations[0].rounds[0].outputTaskIds.map((id) => tasks.find((task) => task.id === id)!)
+    expect(ordered.map((task) => task.inputImageIds)).toEqual(inputImages.map((input) => [input.id]))
+    expect(ordered.map((task) => task.status)).toEqual(['done', 'error', 'done', 'done', 'done'])
+    expect(ordered[1].apiProfileId).toBe(imageProfiles[1 % keyCount].id)
+    vi.mocked(callImageApi).mockResolvedValueOnce({ images: ['data:image/png;base64,retry-output'] })
+    await retryTask(ordered[1])
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(6))
+    expect(vi.mocked(callImageApi).mock.calls[5][0].settings.apiKey).toBe(imageProfiles[1 % keyCount].apiKey)
+    expect(vi.mocked(callImageApi).mock.calls[5][0].inputImageDataUrls).toEqual([inputImages[1].dataUrl])
+    await vi.waitFor(() => expect(useStore.getState().tasks.filter((task) => task.status === 'done')).toHaveLength(5))
+  })
+
+  it('文本接口在两张完成后超时，继续只提交剩余三张', async () => {
+    await clearTasks()
+    const imageProfile = createDefaultOpenAIProfile({ id: 'resume-image', apiKey: 'image-test-key' })
+    const textProfile = createDefaultOpenAIProfile({ id: 'resume-text', apiMode: 'responses', apiKey: 'text-test-key' })
+    useStore.setState({
+      settings: normalizeSettings({ profiles: [imageProfile, textProfile], activeProfileId: imageProfile.id, agentApiConfigMode: 'hybrid', agentTextProfileId: textProfile.id, agentImageProfileId: imageProfile.id, agentImageCount: 5 }),
+      appMode: 'agent', tasks: [], inputImages: [], maskDraft: null, batchProgress: null,
+      params: { ...DEFAULT_PARAMS }, prompt: '生成五张不同的海报',
+      agentConversations: [], activeAgentConversationId: null, agentInputDrafts: {}, agentEditingRoundId: null, showToast: vi.fn(),
+    })
+    const batch = (id: string, numbers: number[]) => ({
+      text: '', images: [], outputItems: [{ type: 'function_call' as const, name: 'generate_image_batch', call_id: id, arguments: JSON.stringify({ images: numbers.map((number) => ({ id: String(number), prompt: `海报 ${number}` })) }) }],
+    })
+    vi.mocked(callAgentResponsesApi).mockReset()
+      .mockResolvedValueOnce(batch('first', [1, 2]))
+      .mockRejectedValueOnce(new Error('接口网关等待上游响应超时（HTTP 504）'))
+      .mockResolvedValueOnce(batch('next', [3, 4]))
+      .mockResolvedValueOnce(batch('last', [5]))
+    vi.mocked(callImageApi).mockReset().mockResolvedValue({ images: ['data:image/png;base64,saved'] })
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.canResumeImagePlan).toBe(true))
+    const conversation = useStore.getState().agentConversations[0]
+    const round = conversation.rounds[0]
+    const firstIds = round.outputTaskIds
+    expect(firstIds).toHaveLength(2)
+    await regenerateAgentAssistantMessage(conversation.id, round.id)
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.status).toBe('done'))
+    expect(vi.mocked(callAgentResponsesApi).mock.calls.map(([request]) => request.remainingImageCount)).toEqual([5, 3, 3, 1])
+    expect(vi.mocked(callImageApi).mock.calls.map(([request]) => request.prompt)).toEqual(['海报 1', '海报 2', '海报 3', '海报 4', '海报 5'])
+    expect(useStore.getState().agentConversations[0].rounds[0].outputTaskIds.slice(0, 2)).toEqual(firstIds)
   })
 
   it('drops long error detail after the failure title', () => {

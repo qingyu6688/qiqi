@@ -20,13 +20,18 @@ export default function AgentRoundProgress({ round, tasks, hasContent = false, o
   const queued = tasks.filter((task) => task.status === 'running' && task.agentQueued).length
   const generating = tasks.filter((task) => task.status === 'running' && !task.agentQueued).length
   const settled = tasks.filter((task) => task.status === 'done' || (task.status === 'error' && !task.falRecoverable && !task.customRecoverable)).length
+  const planned = typeof round.requestedImageCount === 'number' && (tasks.length || round.outputTaskIds.length)
+    ? Math.max(round.requestedImageCount, tasks.length) : tasks.length
+  const unsubmitted = Math.max(0, planned - Math.max(tasks.length, round.outputTaskIds.length))
+  const canContinue = round.canResumeImagePlan && unsubmitted > 0
   const retry = round.requestState?.stage === 'retrying'
   const stage = !running
-    ? stopped ? '已停止' : round.status === 'done' ? (failed ? '部分图片未完成' : '已完成') : completed ? '部分完成，回复已中断' : '生成失败'
+    ? stopped ? '已停止' : round.status === 'done' ? (failed || unsubmitted ? (completed ? '部分图片未完成' : '生成失败') : '已完成') : completed ? '部分完成，回复已中断' : '生成失败'
     : round.requestState?.stage === 'queued' ? '等待生图名额'
-    : retry ? `连接重试 ${round.requestState!.attempt - 1}/${round.requestState!.maxAttempts - 1}`
+    : retry ? `${round.requestState?.retryReason === 'gateway' ? '文本规划重试' : '连接重试'} ${round.requestState!.attempt - 1}/${round.requestState!.maxAttempts - 1}`
     : generating ? '正在生成图片'
     : queued ? '图片排队中'
+    : tasks.length && unsubmitted ? '正在规划下一批图片'
     : tasks.length ? '正在整理回复'
     : round.requestState?.stage === 'connecting' ? '正在连接接口'
     : hasContent ? '正在生成回复' : '等待模型回复'
@@ -42,19 +47,20 @@ export default function AgentRoundProgress({ round, tasks, hasContent = false, o
       </div>
       {tasks.length > 0 && <>
         <div className="flex flex-wrap gap-x-3 gap-y-1 tabular-nums">
-          <span>已完成 {completed}/{tasks.length} 张</span>
+          <span>已完成 {completed}/{planned} 张</span>
+          {unsubmitted > 0 && <span>未提交 {unsubmitted} 张</span>}
           {generating > 0 && <span>生成中 {generating} 张</span>}
           {queued > 0 && <span>排队 {queued} 张</span>}
           {failed > 0 && <span className="text-red-500 dark:text-red-400">失败 {failed} 张</span>}
           {canceled > 0 && <span>已停止 {canceled} 张</span>}
         </div>
-        <progress aria-label="图片任务处理进度" max={tasks.length} value={settled} className={`block h-1.5 w-full appearance-none overflow-hidden rounded-full [&::-webkit-progress-bar]:bg-black/[0.06] dark:[&::-webkit-progress-bar]:bg-white/10 ${failed ? '[&::-webkit-progress-value]:bg-red-400' : '[&::-webkit-progress-value]:bg-amber-700 dark:[&::-webkit-progress-value]:bg-amber-500'}`} />
+        <progress aria-label="图片任务处理进度" max={planned} value={settled} className={`block h-1.5 w-full appearance-none overflow-hidden rounded-full [&::-webkit-progress-bar]:bg-black/[0.06] dark:[&::-webkit-progress-bar]:bg-white/10 ${failed ? '[&::-webkit-progress-value]:bg-red-400' : '[&::-webkit-progress-value]:bg-amber-700 dark:[&::-webkit-progress-value]:bg-amber-500'}`} />
       </>}
       {round.contextNotice && <p className="leading-relaxed">{round.contextNotice}</p>}
       {running && elapsed >= 90 && <p>接口处理较慢，请稍候；已完成的图片会保留。</p>}
-      {round.status === 'error' && !stopped && tasks.length === 0 && round.outputTaskIds.length === 0 && onRetry && (
+      {round.status === 'error' && !stopped && (canContinue || (tasks.length === 0 && round.outputTaskIds.length === 0)) && onRetry && (
         <button type="button" onClick={onRetry} disabled={retryDisabled} className="rounded-lg bg-blue-500/10 px-3 py-2 font-medium text-blue-600 transition-colors hover:bg-blue-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400">
-          重试本轮
+          {canContinue ? `继续生成剩余 ${unsubmitted} 张` : '重试本轮'}
         </button>
       )}
     </div>

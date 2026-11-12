@@ -4,7 +4,7 @@ import {
   type ApiProfile,
   type AppSettings,
 } from '../../types'
-import { normalizeAgentMaxToolRounds } from '../../lib/apiProfiles'
+import { canUseAgentImageQueueProfile, getAgentImageQueueProfiles, normalizeAgentMaxToolRounds, resolveApiProfileModel } from '../../lib/apiProfiles'
 import { isPresetAgentFieldLocked } from '../../lib/presetConfig'
 import Select from '../Select'
 
@@ -40,6 +40,10 @@ export default function AgentSettingsTab({
   commitAgentMaxToolRounds,
   onOpenTextApi,
 }: AgentSettingsTabProps) {
+  const primary = selectedAgentImageProfile ? resolveApiProfileModel(selectedAgentImageProfile) : null
+  const profileIds = draft.agentImageQueueProfileIds ?? []
+  const queueProfiles = primary ? getAgentImageQueueProfiles(draft, primary) : []
+  const queueCandidates = primary ? draft.profiles.filter((profile) => agentImageProfileOptions.some((item) => item.value === profile.id) && canUseAgentImageQueueProfile(profile, primary)) : []
   return (
     <div className="space-y-4">
       <div className="rounded-xl bg-blue-500/[0.06] p-3 text-xs leading-relaxed text-gray-600 dark:text-gray-400">
@@ -124,6 +128,31 @@ export default function AgentSettingsTab({
                 用于生成图像，支持所有类型的 API 配置。
               </div>
             </div>
+          )}
+          {draft.agentApiConfigMode === 'hybrid' && primary && (
+            <fieldset className="space-y-2 rounded-xl border border-black/10 p-3 dark:border-white/10" disabled={isPresetAgentFieldLocked('imageProfileId')}>
+              <legend className="px-1 text-sm text-gray-600 dark:text-gray-300">多图队列 API</legend>
+              <p className="text-xs leading-5 text-gray-500">
+                主配置始终参与。到 API 配置添加使用不同 Key 的图像配置，读取并选中相同模型，再在这里勾选。当前可用 {queueProfiles.length} 个 Key。启用多个 Key 后，每个 Key 同时处理一张，整批受并发设置限制。
+              </p>
+              <div className="space-y-2 text-sm text-gray-700 dark:text-gray-200">
+                <div>{primary.name}（主配置）</div>
+                {queueCandidates.map((profile) => {
+                  const checked = profileIds.includes(profile.id)
+                  const duplicate = queueProfiles.some((item) => item.id !== profile.id && item.apiKey.trim() === profile.apiKey.trim())
+                  return (
+                    <label key={profile.id} className="flex items-center gap-2">
+                      <input type="checkbox" checked={checked} disabled={duplicate && !checked} onChange={(event) => commitSettings({
+                        ...draft,
+                        agentImageQueueProfileIds: event.target.checked ? [...profileIds, profile.id] : profileIds.filter((id) => id !== profile.id),
+                      })} />
+                      <span>{profile.name}{duplicate ? '（Key 重复）' : ''}</span>
+                    </label>
+                  )
+                })}
+                {queueCandidates.length === 0 && <p className="text-xs text-gray-500">暂无使用相同接口协议和模型的备用配置。</p>}
+              </div>
+            </fieldset>
           )}
         </>
       )}

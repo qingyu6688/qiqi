@@ -1,4 +1,5 @@
 import type { AgentConversation, AgentMessage, AgentRound, TaskRecord } from '../types'
+import { MAX_AGENT_IMAGES_PER_ROUND } from '../types'
 import { stripImageMentionMarkers } from './promptImageMentions'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 
@@ -38,6 +39,8 @@ function normalizeAgentRound(value: unknown, fallbackIndex: number): AgentRound 
     maskTargetImageId: typeof round.maskTargetImageId === 'string' ? round.maskTargetImageId : null,
     maskImageId: typeof round.maskImageId === 'string' ? round.maskImageId : null,
     outputTaskIds: normalizeStringArray(round.outputTaskIds),
+    ...(round.requestedImageCount === 'auto' || (typeof round.requestedImageCount === 'number' && Number.isInteger(round.requestedImageCount) && round.requestedImageCount >= 1 && round.requestedImageCount <= MAX_AGENT_IMAGES_PER_ROUND) ? { requestedImageCount: round.requestedImageCount } : {}),
+    ...(round.canResumeImagePlan === true && status === 'error' ? { canResumeImagePlan: true } : {}),
     ...(typeof round.responseId === 'string' ? { responseId: round.responseId } : {}),
     ...(responseOutput ? { responseOutput } : {}),
     ...(typeof round.contextNotice === 'string' ? { contextNotice: round.contextNotice } : {}),

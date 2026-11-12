@@ -1,5 +1,6 @@
 import type { AgentConversation, AgentRound, ResponsesApiResponse, ResponsesOutputItem, TaskRecord } from '../types'
 import { parseBatchImageCallArguments } from './agentApi'
+import { LOCAL_REFERENCE_BATCH_PREFIX } from './agentImageReferences'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -77,6 +78,7 @@ function parseResponseOutputFromPayload(rawResponsePayload?: string): ResponsesO
 }
 
 function sanitizeResponseOutputItemForInput(item: ResponsesOutputItem): unknown | null {
+  if (item.call_id?.startsWith(LOCAL_REFERENCE_BATCH_PREFIX)) return null
   if (item.type === 'web_search_call') return null
   if (item.type === 'image_generation_call') return null
 

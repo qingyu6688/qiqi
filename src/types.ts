@@ -21,6 +21,7 @@ export type CustomProviderTemplate = 'http-image'
 export const DEFAULT_STREAM_PARTIAL_IMAGES = 1
 export const DEFAULT_AGENT_MAX_TOOL_ROUNDS = 15
 export const MAX_AGENT_IMAGES_PER_ROUND = 10
+export const MAX_AGENT_PLAN_BATCH_IMAGES = 2
 /** 接口允许的参考图数量上限 */
 export const MAX_INPUT_IMAGES = 16
 
@@ -195,6 +196,7 @@ export interface AppSettings {
   agentApiConfigMode: AgentApiConfigMode
   agentTextProfileId?: string | null
   agentImageProfileId?: string | null
+  agentImageQueueProfileIds?: string[]
   profiles: ApiProfile[]
   activeProfileId: string
 }
@@ -337,6 +339,8 @@ export interface TaskRecord {
   agentBatchCallId?: string
   /** Agent 批量图像工具中的稳定条目 ID */
   agentBatchItemId?: string
+  /** 逐参考图直接生成的任务在重试时由客户端补充尺寸提示。 */
+  agentLocalReference?: boolean
   /** Agent 图像工具实际动作 */
   agentToolAction?: 'generate' | 'edit' | 'auto' | string
 }
@@ -376,6 +380,8 @@ export interface AgentRound {
   maskTargetImageId?: string | null
   maskImageId?: string | null
   outputTaskIds: string[]
+  requestedImageCount?: number | 'auto'
+  canResumeImagePlan?: boolean
   responseId?: string
   responseOutput?: ResponsesOutputItem[]
   status: AgentRoundStatus
@@ -391,6 +397,7 @@ export interface RequestConnectionState {
   stage: 'queued' | 'connecting' | 'waiting' | 'retrying'
   attempt: number
   maxAttempts: number
+  retryReason?: 'gateway'
 }
 
 export interface AgentConversation {

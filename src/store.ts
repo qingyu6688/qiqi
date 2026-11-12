@@ -22,10 +22,10 @@ import type {
   StoredImage,
   StoredImageThumbnail,
 } from './types'
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, MAX_AGENT_IMAGES_PER_ROUND, DEFAULT_PARAMS } from './types'
+import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, MAX_AGENT_IMAGES_PER_ROUND, MAX_AGENT_PLAN_BATCH_IMAGES, DEFAULT_PARAMS } from './types'
 import { createIndependentImagePrompt } from './lib/independentImages'
 import { fitOutputImage } from './lib/outputImageSize'
-import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, resolveApiProfileModel, splitModelList, validateApiProfile } from './lib/apiProfiles'
+import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentImageQueueProfiles, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, resolveApiProfileModel, splitModelList, validateApiProfile } from './lib/apiProfiles'
 import { enforcePresetConfigPolicy, getPresetConfig, getPresetProfileIds, getPresetProviderIds, isPresetConfigDeletionPrevented, isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile, isPresetProviderDeletionPrevented } from './lib/presetConfig'
 import { dismissAllTooltips } from './lib/tooltipDismiss'
 import { getTaskPromptText, remapImageMentionsForOrder, replaceImageMentionsForApi, stripImageMentionMarkers } from './lib/promptImageMentions'
@@ -52,7 +52,7 @@ import {
 import { callImageApi } from './lib/api'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage } from './lib/agentApi'
 import { buildAgentApiInput, buildAgentContinuationInput } from './lib/agentInputBuilder'
-import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId } from './lib/agentImageReferences'
+import { collectAgentRoundOutputImageSlots, createAgentReferenceBatch, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId, getAgentReferenceTag, LOCAL_REFERENCE_BATCH_PREFIX } from './lib/agentImageReferences'
 import { showBrowserNotification } from './lib/browserNotification'
 import { IMAGE_FETCH_CORS_HINT, isHttpUrl } from './lib/imageApiShared'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
@@ -61,7 +61,7 @@ import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { runWithConcurrency, settleWithConcurrency, splitBatchPrompts } from './lib/batchPrompts'
-import { getImageRequestConcurrency, setImageRequestConcurrency } from './lib/imageRequestQueue'
+import { getImageRequestConcurrency, setImageRequestConcurrency, withImageCredentialSlot } from './lib/imageRequestQueue'
 import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, scheduleMissingThumbnailBackfill } from './lib/imageCache'
@@ -2701,6 +2701,7 @@ export async function submitAgentMessage() {
     maskTargetImageId,
     maskImageId,
     outputTaskIds: [],
+    requestedImageCount: requestSettings.agentImageCount,
     status: 'running',
     error: null,
     createdAt: now,
@@ -2750,7 +2751,7 @@ export async function submitAgentMessage() {
   state.clearMaskDraft()
   state.setAgentEditingRoundId(null)
 
-  if (fallbackTitle) {
+  if (fallbackTitle && !createAgentReferenceBatch(trimmedPrompt, inputImageIds.length, round.requestedImageCount, Boolean(maskImageId))) {
     void generateAgentConversationTitle(conversation.id, stripImageMentionMarkers(trimmedPrompt), inputImageIds, requestSettings, activeProfile, fallbackTitle)
   }
 
@@ -2788,7 +2789,8 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
   }
 
   const inputImageIds = uniqueIds(sourceRound.inputImageIds)
-  const requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
+  const requestedImageCount = sourceRound.requestedImageCount ?? normalizedSettings.agentImageCount
+  const requestSettings = { ...createSettingsForApiProfile(normalizedSettings, activeProfile), agentImageCount: requestedImageCount }
   const imageRequestSettings = createSettingsForApiProfile(normalizedSettings, imageProfile)
   const normalizedParams = {
     ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: inputImageIds.length > 0 }),
@@ -2796,7 +2798,12 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
     transparent_output: false,
   }
   const now = Date.now()
-  if (sourceRound.status === 'error') {
+  const roundTasks = state.tasks.filter((task) => task.agentRoundId === sourceRound.id)
+  const resumePlan = sourceRound.status === 'error' && sourceRound.canResumeImagePlan === true
+    && typeof requestedImageCount === 'number' && sourceRound.outputTaskIds.length > 0
+    && sourceRound.outputTaskIds.length < requestedImageCount && Boolean(sourceRound.responseOutput?.length)
+    && !roundTasks.some((task) => task.status === 'running' || task.falRecoverable || task.customRecoverable)
+  if (resumePlan || (sourceRound.status === 'error' && (sourceRound.requestedImageCount === undefined || sourceRound.outputTaskIds.length === 0))) {
     const assistantMessageId = sourceRound.assistantMessageId
       ?? conversation.messages.find((message) => message.roundId === sourceRound.id && message.role === 'assistant')?.id
     updateAgentConversation(conversationId, (current) => ({
@@ -2807,9 +2814,9 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
         round.id === sourceRound.id
           ? {
               ...round,
-              outputTaskIds: [],
-              responseId: undefined,
-              responseOutput: undefined,
+              requestedImageCount,
+              canResumeImagePlan: undefined,
+              ...(resumePlan ? {} : { outputTaskIds: [], responseId: undefined, responseOutput: undefined }),
               status: 'running',
               error: null,
               finishedAt: null,
@@ -2818,12 +2825,15 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
       ),
       messages: assistantMessageId
         ? current.messages.map((message) =>
-            message.id === assistantMessageId ? { ...message, content: '', outputTaskIds: [] } : message,
+            message.id === assistantMessageId ? { ...message, content: '', outputTaskIds: resumePlan ? sourceRound.outputTaskIds : [] } : message,
           )
         : current.messages,
     }))
     state.setAgentEditingRoundId(null)
-    void executeAgentRound(conversationId, sourceRound.id, normalizedParams, requestSettings, activeProfile, imageProfile)
+    const responseOutput = sourceRound.responseOutput ?? []
+    void executeAgentRound(conversationId, sourceRound.id, resumePlan ? roundTasks[0]?.params ?? normalizedParams : normalizedParams, requestSettings, activeProfile, imageProfile, resumePlan
+      ? { responseOutput, recoveredTaskIds: sourceRound.outputTaskIds, toolCallsUsed: getAgentRecoveredToolCallCount(responseOutput, roundTasks) }
+      : undefined)
     return
   }
 
@@ -2839,6 +2849,7 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
     maskTargetImageId: sourceRound.maskTargetImageId ?? sourceUserMessage.maskTargetImageId ?? null,
     maskImageId: sourceRound.maskImageId ?? sourceUserMessage.maskImageId ?? null,
     outputTaskIds: [],
+    requestedImageCount,
     status: 'running',
     error: null,
     createdAt: now,
@@ -2878,6 +2889,7 @@ async function executeAgentRound(
   const startedAt = Date.now()
   const controller = new AbortController()
   const controllerKey = getAgentRoundControllerKey(conversationId, roundId)
+  let canResumeImagePlan = false
   agentRoundControllers.set(controllerKey, controller)
   updateAgentConversation(conversationId, (current) => ({
     ...current,
@@ -2890,6 +2902,9 @@ async function executeAgentRound(
     const round = conversation.rounds.find((item) => item.id === roundId)
     const userMessage = round ? conversation.messages.find((message) => message.id === round.userMessageId) : null
     if (!round || !userMessage) return
+    const requestedImageCount = round.requestedImageCount ?? requestSettings.agentImageCount
+    requestSettings = { ...requestSettings, agentImageCount: requestedImageCount }
+    const localBatch = createAgentReferenceBatch(round.prompt, round.inputImageIds.length, requestedImageCount, Boolean(round.maskImageId))
     const maskDataUrl = round.maskImageId ? await ensureImageCached(round.maskImageId) : undefined
     if (round.maskImageId && !maskDataUrl) throw new Error('遮罩图片已不存在')
 
@@ -2897,7 +2912,7 @@ async function executeAgentRound(
       ...current,
       rounds: current.rounds.map((item) => item.id === roundId ? { ...item, contextNotice } : item),
     }))
-    const apiInput = await buildAgentApiInput({
+    const apiInput = localBatch ? [] : await buildAgentApiInput({
       conversation,
       currentRound: round,
       onContextCompacted,
@@ -2912,6 +2927,8 @@ async function executeAgentRound(
     const resumedAssistantContent = resume ? existingAssistantMessage?.content.trim() ?? '' : ''
     const shouldStreamAssistantMessage = activeProfile.streamImages === true
     const imageRequestSettings = createSettingsForApiProfile(requestSettings, imageProfile)
+    const queueProfiles = getAgentImageQueueProfiles(requestSettings, imageProfile)
+    const useMultipleKeys = queueProfiles.length > 1
     const imageParams = normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: round.inputImageIds.length > 0 })
     const streamingTaskIds: string[] = resume ? [...round.outputTaskIds] : []
     const getRemainingImageCount = () => typeof requestSettings.agentImageCount === 'number'
@@ -2956,7 +2973,7 @@ async function executeAgentRound(
       toolCallId: string,
       taskPrompt = '',
       inputImageIds = round.inputImageIds ?? [],
-      options: { createdAt?: number; agentBatchCallId?: string; agentBatchItemId?: string; maskTargetImageId?: string | null; maskImageId?: string | null; taskParams?: TaskParams; queued?: boolean } = {},
+      options: { createdAt?: number; agentBatchCallId?: string; agentBatchItemId?: string; maskTargetImageId?: string | null; maskImageId?: string | null; taskParams?: TaskParams; queued?: boolean; apiProfile?: ApiProfile; localReference?: boolean } = {},
     ) => {
       const existingTaskId = taskIdByToolCallId.get(toolCallId)
       if (existingTaskId) return existingTaskId
@@ -2970,15 +2987,16 @@ async function executeAgentRound(
       }
 
       if (streamingTaskIds.length >= MAX_AGENT_IMAGES_PER_ROUND) throw new Error(`本轮已达到 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片的上限，请在下一条消息继续生成。`)
+      const taskProfile = options.apiProfile ?? imageProfile
       const task: TaskRecord = {
         id: genId(),
         prompt: taskPrompt,
         params: options.taskParams ?? { ...imageParams, n: 1 },
-        apiProvider: imageProfile.provider,
-        apiProfileId: imageProfile.id,
-        apiProfileName: imageProfile.name,
-        apiMode: imageProfile.apiMode,
-        apiModel: imageProfile.model,
+        apiProvider: taskProfile.provider,
+        apiProfileId: taskProfile.id,
+        apiProfileName: taskProfile.name,
+        apiMode: taskProfile.apiMode,
+        apiModel: taskProfile.model,
         inputImageIds,
         maskTargetImageId: options.maskTargetImageId !== undefined ? options.maskTargetImageId : round.maskTargetImageId ?? null,
         maskImageId: options.maskImageId !== undefined ? options.maskImageId : round.maskImageId ?? null,
@@ -2996,6 +3014,7 @@ async function executeAgentRound(
         agentToolCallId: toolCallId,
         ...(options.agentBatchCallId ? { agentBatchCallId: options.agentBatchCallId } : {}),
         ...(options.agentBatchItemId ? { agentBatchItemId: options.agentBatchItemId } : {}),
+        ...(options.localReference ? { agentLocalReference: true } : {}),
       }
 
       taskIdByToolCallId.set(toolCallId, task.id)
@@ -3080,7 +3099,7 @@ async function executeAgentRound(
       return false
     }
 
-    if (shouldStreamAssistantMessage) {
+    if (shouldStreamAssistantMessage || localBatch) {
       updateAgentConversation(conversationId, (current) => ({
         ...current,
         updatedAt: Date.now(),
@@ -3114,10 +3133,11 @@ async function executeAgentRound(
     let lastResponseId: string | undefined = round.responseId
     let toolCallsUsed = resume?.toolCallsUsed ?? 0
     let apiInputForTurn = apiInput
-    if (resume) {
+    if (resume && !localBatch) {
       const resumeState = useStore.getState()
       apiInputForTurn = await buildAgentContinuationInput({
-        onContextCompacted,        baseInput: apiInput,
+        onContextCompacted,
+        baseInput: apiInput,
         currentRound: round,
         tasks: resumeState.tasks,
         currentRoundOutput: accumulatedOutputItems,
@@ -3191,20 +3211,23 @@ async function executeAgentRound(
       referenceImageSourceUrls?: (string | null)[]
       taskParams: TaskParams
       signal: AbortSignal
+      skipCodexCliSizePrompt?: boolean
+      apiProfile?: ApiProfile
       onPartialImage?: (event: { image: string; partialImageIndex?: number }) => void | Promise<void>
     }) => {
-      const result = await callImageApi({
+      const profile = opts.apiProfile ?? imageProfile
+      const request = () => callImageApi({
         signal: opts.signal,
         onRequestStarted: () => {
           if (!useStore.getState().tasks.some((task) => task.id === opts.taskId && task.status === 'running')) throw new Error('任务已停止或删除，未发出图片请求')
           updateTaskInStore(opts.taskId, { agentQueued: false, startedAt: Date.now() })
         },
-        settings: imageRequestSettings,
+        settings: profile.id === imageProfile.id ? imageRequestSettings : createSettingsForApiProfile(requestSettings, profile),
         prompt: replaceImageMentionsForApi(opts.prompt, opts.referenceImageDataUrls.length),
         params: opts.taskParams,
         inputImageDataUrls: opts.referenceImageDataUrls,
         inputImageUrls: opts.referenceImageSourceUrls,
-        skipCodexCliSizePrompt: true,
+        skipCodexCliSizePrompt: opts.skipCodexCliSizePrompt ?? true,
         onPartialImage: opts.onPartialImage
           ? (partial) => {
               void opts.onPartialImage?.({ image: partial.image, partialImageIndex: partial.partialImageIndex ?? partial.requestIndex })
@@ -3224,6 +3247,7 @@ async function executeAgentRound(
           })
         },
       })
+      const result = useMultipleKeys && opts.apiProfile ? await withImageCredentialSlot(profile.apiKey, request, opts.signal) : await request()
       if (opts.signal.aborted) throw createAgentAbortError()
       const dataUrl = result.images[0]
       return {
@@ -3306,7 +3330,7 @@ async function executeAgentRound(
     }
 
     // Helper: execute a generate_image_batch function call concurrently
-    const executeBatchFunctionCall = async (functionCallItem: ResponsesOutputItem): Promise<string> => {
+    const executeBatchFunctionCall = async (functionCallItem: ResponsesOutputItem, ownReferencePerImage = false): Promise<string> => {
       const callId = functionCallItem.call_id ?? ''
       const args = functionCallItem.arguments ?? ''
       const batchItems = parseBatchImageCallArguments(args)
@@ -3316,19 +3340,23 @@ async function executeAgentRound(
       }
       const remainingCount = getRemainingImageCount()
       const remainingBudget = MAX_AGENT_IMAGES_PER_ROUND - streamingTaskIds.length
-      if (batchItems.length > remainingBudget) throw new Error(`本轮最多生成 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片，剩余 ${Math.max(0, remainingBudget)} 张；模型提交了 ${batchItems.length} 张，已停止提交。请减少数量或在下一条消息继续。`)
       if (remainingCount === 0) return JSON.stringify({ status: 'done', message: '本轮图片请求数量已用完，未追加请求。' })
-      if (remainingCount !== undefined && batchItems.length !== remainingCount) throw new Error(`文本模型提交了 ${batchItems.length} 张图片任务，与本轮剩余数量 ${remainingCount} 张不符，已停止提交。请重试或切换文本模型。`)
+      if (batchItems.length > remainingBudget) throw new Error(`本轮最多生成 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片，剩余 ${Math.max(0, remainingBudget)} 张；模型提交了 ${batchItems.length} 张，已停止提交。请减少数量或在下一条消息继续。`)
+      if (remainingCount !== undefined && batchItems.length > remainingCount) throw new Error(`文本模型提交了 ${batchItems.length} 张图片任务，超过本轮剩余的 ${remainingCount} 张，已停止提交。请重试或切换文本模型。`)
 
       // Create task cards in model-provided order before starting network calls.
       const batchExecutionItems = []
-      for (const item of batchItems) {
-        const referenceIds = uniqueIds(extractAgentReferenceIds(item.prompt))
+      const queueOffset = streamingTaskIds.length
+      for (const [index, item] of batchItems.entries()) {
+        if (controller.signal.aborted) throw createAgentAbortError()
+        const referenceIds = ownReferencePerImage ? [getAgentCurrentReferenceId(round, index)] : uniqueIds(extractAgentReferenceIds(item.prompt))
         const references = await resolveReferenceImages(referenceIds)
         const batchToolCallId = genId()
+        const taskProfile = queueProfiles[(queueOffset + index) % queueProfiles.length]
+        const taskSettings = taskProfile.id === imageProfile.id ? imageRequestSettings : createSettingsForApiProfile(requestSettings, taskProfile)
         const taskParams = requestSettings.agentApiConfigMode === 'hybrid'
           ? {
-              ...normalizeParamsForSettings(imageParams, imageRequestSettings, { hasInputImages: references.dataUrls.length > 0 }),
+              ...normalizeParamsForSettings(imageParams, taskSettings, { hasInputImages: references.dataUrls.length > 0 }),
               n: 1,
             }
           : { ...imageParams, n: 1 }
@@ -3336,20 +3364,24 @@ async function executeAgentRound(
           createdAt: Date.now(),
           queued: true,
           taskParams,
+          apiProfile: taskProfile,
+          localReference: ownReferencePerImage,
           maskTargetImageId: null,
           maskImageId: null,
           ...(callId ? { agentBatchCallId: callId } : {}),
           agentBatchItemId: item.id,
         })
-        batchExecutionItems.push({ item, batchToolCallId, references, referenceIds, taskParams })
+        batchExecutionItems.push({ item, batchToolCallId, references, referenceIds, taskParams, taskProfile })
       }
 
       // 排队期间不启动接口超时计时，上一张结束后再腾出请求名额。
-      const batchResults = await settleWithConcurrency(batchExecutionItems, getImageRequestConcurrency(), async ({ item, batchToolCallId, references, referenceIds, taskParams }) => {
+      const concurrency = Math.min(useMultipleKeys ? queueProfiles.length : MAX_AGENT_PLAN_BATCH_IMAGES, getImageRequestConcurrency())
+      const batchResults = await settleWithConcurrency(batchExecutionItems, concurrency, async ({ item, batchToolCallId, references, referenceIds, taskParams, taskProfile }) => {
         if (controller.signal.aborted) throw createAgentAbortError()
         const taskId = taskIdByToolCallId.get(batchToolCallId)
         if (!taskId || !useStore.getState().tasks.some((task) => task.id === taskId)) throw new Error('任务已删除，未发出图片请求')
         try {
+          if (ownReferencePerImage && references.dataUrls.length !== 1) throw new Error('此任务的参考图无法读取，未发送图片请求。')
           let committed = false
           const batchResult = requestSettings.agentApiConfigMode === 'hybrid'
             ? {
@@ -3361,6 +3393,8 @@ async function executeAgentRound(
                   referenceImageSourceUrls: references.sourceUrls,
                   taskParams,
                   signal: controller.signal,
+                  skipCodexCliSizePrompt: !ownReferencePerImage,
+                  apiProfile: taskProfile,
                   onPartialImage: async ({ image, partialImageIndex }) => {
                     if (controller.signal.aborted) return
                     const taskId = taskIdByToolCallId.get(batchToolCallId)
@@ -3379,7 +3413,9 @@ async function executeAgentRound(
                 profile: imageProfile,
                 params: taskParams,
                 batchItemId: item.id,
-                prompt: item.prompt,
+                prompt: ownReferencePerImage && imageProfile.codexCli && taskParams.size !== 'auto'
+                  ? `Generate at ${taskParams.size} resolution. ${item.prompt}`
+                  : item.prompt,
                 referenceImageDataUrls: references.dataUrls,
                 referenceIds,
                 allowPromptRewrite: requestSettings.allowPromptRewrite,
@@ -3470,11 +3506,24 @@ async function executeAgentRound(
       return JSON.stringify({ images: outputImages })
     }
 
-    while (true) {
+    if (localBatch && !resume) {
+      const call = { type: 'function_call' as const, name: 'generate_image_batch', call_id: `${LOCAL_REFERENCE_BATCH_PREFIX}${round.id}`, arguments: JSON.stringify({ images: localBatch }) }
+      accumulatedOutputItems = [call]
+      updateAgentConversation(conversationId, (current) => ({
+        ...current,
+        rounds: current.rounds.map((item) => item.id === roundId ? { ...item, responseOutput: accumulatedOutputItems } : item),
+      }))
+      const output = await executeBatchFunctionCall(call, true)
+      accumulatedOutputItems = mergeResponseOutputItems(accumulatedOutputItems, [{ type: 'function_call_output', call_id: call.call_id, output }])
+    }
+
+    while (!localBatch && getRemainingImageCount() !== 0) {
       if (controller.signal.aborted) throw createAgentAbortError()
       if (reachedToolLimit) break
       const textBeforeResponse = accumulatedText
       let currentResponseOutputItems: ResponsesOutputItem[] = []
+      canResumeImagePlan = typeof requestedImageCount === 'number' && requestedImageCount > streamingTaskIds.length && streamingTaskIds.length > 0
+      const resumableResponseOutput = canResumeImagePlan ? accumulatedOutputItems : undefined
       const result = await callAgentResponsesApi({
         settings: requestSettings,
         profile: activeProfile,
@@ -3545,8 +3594,18 @@ async function executeAgentRound(
               failAgentImageTask(toolCallId, error)
             }
           : undefined,
+      }).catch((err: unknown) => {
+        if (resumableResponseOutput) {
+          const responseOutput = resumableResponseOutput
+          updateAgentConversation(conversationId, (current) => ({
+            ...current,
+            rounds: current.rounds.map((item) => item.id === roundId ? { ...item, responseOutput } : item),
+          }))
+        }
+        throw err
       })
       if (controller.signal.aborted) throw createAgentAbortError()
+      canResumeImagePlan = false
 
       lastResponseId = result.responseId ?? lastResponseId
       currentResponseOutputItems = canonicalizeBatchFunctionCallArguments(
@@ -3721,6 +3780,11 @@ async function executeAgentRound(
           updatedAt: Date.now(),
           rounds: current.rounds.map((item) => item.id === roundId ? { ...item, responseId: lastResponseId, responseOutput: accumulatedOutputItems } : item),
         }))
+        const remaining = getRemainingImageCount()
+        if (streamingTaskIds.length > 0 && remaining !== undefined && remaining > 0) {
+          canResumeImagePlan = true
+          throw new Error(`文本模型提前结束，本轮还有 ${remaining} 张未提交。已完成的图片已保留。`)
+        }
         break
       }
 
@@ -3729,6 +3793,9 @@ async function executeAgentRound(
         updatedAt: Date.now(),
         rounds: current.rounds.map((item) => item.id === roundId ? { ...item, responseId: lastResponseId, responseOutput: accumulatedOutputItemsWithFunctionOutputs } : item),
       }))
+
+      accumulatedOutputItems = accumulatedOutputItemsWithFunctionOutputs
+      if (getRemainingImageCount() === 0) break
 
       if (toolCallsUsed >= maxToolCalls) {
         reachedToolLimit = true
@@ -3742,7 +3809,8 @@ async function executeAgentRound(
       if (!latestRound) break
 
       apiInputForTurn = await buildAgentContinuationInput({
-        onContextCompacted,        baseInput: apiInput,
+        onContextCompacted,
+        baseInput: apiInput,
         currentRound: latestRound,
         tasks: continuationState.tasks,
         currentRoundOutput: accumulatedOutputItemsWithFunctionOutputs,
@@ -3752,7 +3820,6 @@ async function executeAgentRound(
         maxToolCalls,
         loadImage: ensureImageCached,
       })
-      accumulatedOutputItems = accumulatedOutputItemsWithFunctionOutputs
       pendingToolTextSeparator = true
     }
 
@@ -3775,10 +3842,12 @@ async function executeAgentRound(
       ? scrubResponseOutputForDeletedAgentTasks(latestRound, accumulatedOutputItems, deletedTasks, [...latestTasks, ...deletedTasks])
       : accumulatedOutputItems
     const limitNotice = reachedToolLimit ? `已达到最大工具调用次数（${maxToolCalls}），已停止自动续跑。` : ''
+    const failedImageCount = taskIds.filter((id) => latestTasks.some((task) => task.id === id && task.status === 'error')).length
+    const imageSummary = taskIds.length ? `已生成 ${outputIds.length}/${requestedImageCount === 'auto' ? taskIds.length : requestedImageCount} 张图片。${failedImageCount ? ` ${failedImageCount} 张失败，可在对应图片卡片上重试。` : ''}` : ''
     const joinedText = textSegments.join('\n\n').trim()
-    const finalContent = [joinedText, limitNotice]
+    const finalContent = [joinedText, localBatch || typeof requestedImageCount === 'number' ? imageSummary : '', limitNotice]
       .filter(Boolean)
-      .join(joinedText ? '\n\n' : '')
+      .join('\n\n')
       || (taskIds.length > 0 || outputIds.length > 0 ? '图像已生成。' : '')
 
     const assistantMessage: AgentMessage = {
@@ -3813,7 +3882,7 @@ async function executeAgentRound(
     }))
 
     if (!isConversationHiddenByPrivacyMode(conversationId)) {
-      useStore.getState().showToast(outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复', 'success')
+      useStore.getState().showToast(failedImageCount ? imageSummary : outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复', failedImageCount ? (outputIds.length ? 'info' : 'error') : 'success')
       showTaskCompletionNotification(
         outputIds.length > 0 ? 'Agent 已生成图片' : 'Agent 已回复',
         outputIds.length > 0 ? `生图助手回复已结束，共生成 ${outputIds.length} 张图片。` : '生图助手回复已结束。',
@@ -3847,7 +3916,7 @@ async function executeAgentRound(
 
       return {
         ...current,
-        title: current.rounds.length === 1 && current.rounds[0].id === roundId ? '新对话' : current.title,
+        title: current.rounds.length === 1 && current.rounds[0].id === roundId && !failedRound?.outputTaskIds.length ? '新对话' : current.title,
         updatedAt: Date.now(),
         rounds: current.rounds.map((round) =>
           round.id === roundId
@@ -3856,6 +3925,7 @@ async function executeAgentRound(
                 ...(existingAssistantMessage ? { assistantMessageId: existingAssistantMessage.id } : {}),
                 status: 'error',
                 error: message,
+                canResumeImagePlan: canResumeImagePlan || undefined,
                 finishedAt: Date.now(),
               }
             : round,
@@ -3976,7 +4046,7 @@ async function executeTask(taskId: string) {
       inputImageDataUrls: inputDataUrls,
       inputImageUrls: task.inputImageIds.map((id) => useStore.getState().imageSourceUrls[id] ?? null),
       maskDataUrl,
-      skipCodexCliSizePrompt: task.sourceMode === 'agent',
+      skipCodexCliSizePrompt: task.sourceMode === 'agent' && !task.agentLocalReference,
       onFalRequestEnqueued: (request) => {
         if (taskExecutions.get(taskId) !== execution) return
         falRequestInfo = request
@@ -4285,6 +4355,7 @@ export async function retryTask(task: TaskRecord) {
     prompt: source.prompt,
     params: taskParams,
     independentImage: source.independentImage,
+    agentLocalReference: source.agentLocalReference,
     ...(sourceConversation && sourceRound ? {
       sourceMode: 'agent' as const,
       agentConversationId: sourceConversation.id,
