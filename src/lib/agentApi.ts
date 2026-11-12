@@ -3,6 +3,7 @@ import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devP
 import { appendStreamingFormatHint, createRequestTimeoutError, getApiErrorMessage, getResponsesImageResultBase64, maybeAppendImageToolDroppedHint, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
 import { withImageRequestSlot } from './imageRequestQueue'
+import { getAgentGuidance } from './agentGuidance'
 import { apiFetch } from './platform'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { isEventStreamResponse, readJsonServerSentEvents, throwIfAborted } from './serverSentEvents'
@@ -34,7 +35,7 @@ const AGENT_IMAGE_INSTRUCTIONS = [
   '## Progressive Batch Generation',
   'For multi-image requests, use a progressive batching strategy to ensure consistency:',
   '  1. 后续图片确实需要引用尚未生成的基础图时，先生成基础图。可以共用现有参考图的独立任务可以同时提交。',
-  '  2. 图片之间没有依赖时，按本轮给出的批次上限提交尽可能多的独立图片，收到结果后再规划下一批。每张只写必要的画面要求。',
+  '  2. 图片之间没有依赖时，按本轮给出的批次上限提交尽可能多的独立图片，收到结果后再规划下一批。逐条保留本张适用的文字原文、颜色、元素数量、位置、构图、禁止项和仍有效的角色及画风设定。每张提示词都应完整，不能用“同上”代替细节。',
   '  3. 独立图片：多张图片使用 generate_image_batch，每张图片对应 images 数组中的一个条目。五张图片必须是五个独立条目和五个独立图片文件，不能合成一张拼贴或宫格。共享风格不意味着共享一张画布。',
   'As the turn continues, output a brief progress note before each tool call.',
   'For single-image requests, generate directly without any listing.',
@@ -48,6 +49,7 @@ const AGENT_IMAGE_INSTRUCTIONS = [
   '## Reference tags and generated images in context',
   'NEVER output `<ref>`, `<available_refs>`, `<removed_ref>`, or any XML reference tags in visible assistant text — the system injects them automatically and your raw output will be shown directly to the user.',
   '- Previously generated images are injected as user messages containing the actual image (input_image) followed by a `<ref id="round-N-image-M" prompt="..." />` tag identifying it.',
+  '- 有些历史生成图只提供编号和提示词。可以在生图提示词里引用该编号，客户端会从本机读取对应图片。只有附带像素的图片才可据此描述看见的细节。',
   '- Deleted images appear as `<removed_ref id="..." />` without an accompanying image — do not reference them.',
   '- In user messages: `<ref id="..." />` may also point to user-attached/cited images.',
   '- In generate_image_batch tool arguments, include matching `<ref id="..." />` tags inside each image prompt when the prompt refers to a reference image. Do not use separate bare reference ids.',
@@ -62,7 +64,7 @@ const AGENT_MATH_FORMATTING_INSTRUCTIONS = [
   '- Do not use LaTeX delimiters like `\\(...\\)` or `\\[...\\]` in visible assistant text.',
 ].join('\n')
 
-function createAgentInstructions(settings: AppSettings, codexCliSize: string | undefined, remainingImageCount: number | undefined, imageRequestBudget: number, batchImageLimit: number) {
+function createAgentInstructions(settings: AppSettings, codexCliSize: string | undefined, remainingImageCount: number | undefined, imageRequestBudget: number, batchImageLimit: number, conversationInstructions?: string) {
   const maxToolRounds = Number.isFinite(settings.agentMaxToolRounds)
     ? Math.max(1, Math.trunc(settings.agentMaxToolRounds))
     : DEFAULT_AGENT_MAX_TOOL_ROUNDS
@@ -76,6 +78,7 @@ function createAgentInstructions(settings: AppSettings, codexCliSize: string | u
     : AGENT_IMAGE_INSTRUCTIONS
   const instructions = [
     imageInstructions,
+    getAgentGuidance(settings.agentCustomInstructions, conversationInstructions),
     '',
     '## Tool policy',
     `本轮最多请求 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片，目前剩余 ${imageRequestBudget} 张；失败的请求也占用数量，不要擅自补图。超出时说明需下一条消息继续。`,
@@ -623,6 +626,7 @@ interface AgentResponseOptions {
   remainingImageCount?: number
   imageRequestBudget?: number
   imageBatchConcurrency?: number
+  conversationInstructions?: string
   onConnectionState?: (state: RequestConnectionState) => void
   maskDataUrl?: string
   signal?: AbortSignal
@@ -660,7 +664,7 @@ async function callAgentResponsesApiRequest(opts: AgentResponseOptions): Promise
     const tools = createAgentTools(params, profile, settings, maskDataUrl, remainingImageCount, batchImageLimit)
     const body: Record<string, unknown> = {
       model: profile.model,
-      instructions: createAgentInstructions(settings, (imageProfile ?? profile).codexCli ? params.size : undefined, remainingImageCount, imageRequestBudget, batchImageLimit),
+      instructions: createAgentInstructions(settings, (imageProfile ?? profile).codexCli ? params.size : undefined, remainingImageCount, imageRequestBudget, batchImageLimit, opts.conversationInstructions),
       input,
       ...(tools.length ? { tools } : {}),
       // 原生生图每次回复最多执行一次内置工具，下一次调用前由客户端重新核对本轮数量。

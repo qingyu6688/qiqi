@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { AgentRound, TaskRecord } from '../types'
 import { DEFAULT_PARAMS } from '../types'
 import { getSelectedImageMentionLabel, getSelectedTextMentionLabel } from './promptImageMentions'
-import { createAgentReferenceBatch, extractAgentReferenceIds, replaceAgentPromptImageReferencesForApi, resolveAgentPromptImageReferences } from './agentImageReferences'
+import { createAgentReferenceBatch, extractAgentReferenceIds, getAgentImageReferenceIds, preserveAgentImageRequirements, replaceAgentPromptImageReferencesForApi, resolveAgentPromptImageReferences } from './agentImageReferences'
 
 const round = (patch: Partial<AgentRound>): AgentRound => ({
   id: patch.id ?? `round-${patch.index ?? 1}`,
@@ -35,6 +35,24 @@ const task = (id: string, outputImages: string[]): TaskRecord => ({
 })
 
 describe('agent image references', () => {
+  it('每张保留原话中的文字、颜色、数量和禁止项，原话已经存在时不重复添加', () => {
+    const original = '生成三张海报，文字必须是“柒柒”，天蓝色底，右下角两只猫，不要边框'
+    for (let i = 1; i <= 3; i++) {
+      const result = preserveAgentImageRequirements(`第 ${i} 张海报`, original, 0, '主角为戴蓝围巾的白猫')
+      expect(result.startsWith(`第 ${i} 张海报`)).toBe(true)
+      expect(result).toContain(original)
+      expect(result).toContain('其他图片的主题不画进本张')
+      expect(result).toContain('主角为戴蓝围巾的白猫')
+    }
+    expect(preserveAgentImageRequirements(`用户要求：${original}`, original, 0)).toBe(`用户要求：${original}`)
+  })
+
+  it('漏写引用标签时带上本轮所有参考图，显式引用不额外加入其他参考图', () => {
+    const current = round({ index: 3, inputImageIds: ['cat', 'style'] })
+    expect(getAgentImageReferenceIds('白猫在海边', current)).toEqual(['round-3-reference-1', 'round-3-reference-2'])
+    expect(getAgentImageReferenceIds('参考 <ref id="round-1-image-2" />', current)).toEqual(['round-1-image-2'])
+    expect(getAgentImageReferenceIds('纯文字生图', round({ index: 2 }))).toEqual([])
+  })
   it('只把明确的一图对应一张成图请求拆进本地队列', () => {
     const text = '依次根据每张图里面的毛毯图案生成相似风格不同款式'
     expect(createAgentReferenceBatch(text, 5, 5, false)?.map((item) => item.id)).toEqual(['reference-1', 'reference-2', 'reference-3', 'reference-4', 'reference-5'])

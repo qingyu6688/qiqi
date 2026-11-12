@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { createIndependentImagePrompt } from './independentImages'
 
 describe('多图独立提示词', () => {
+  it('默认保留构图，用户选择换方案后才要求变化，均遵守原始约束', () => {
+    const prompt = '蓝色背景，猫在左侧，不要文字'
+    expect(createIndependentImagePrompt(prompt, 0, 4)).toContain('保持同一方案及构图')
+    expect(createIndependentImagePrompt(prompt, 0, 4)).not.toContain('变化构图')
+    expect(createIndependentImagePrompt(prompt, 0, 4, 'vary')).toContain('变化构图或细节')
+    expect(createIndependentImagePrompt(prompt, 0, 4, 'vary')).toContain(prompt)
+  })
   it('五个序号分别只要求一张作品，并保留完整的主题与风格', () => {
     const prompt = '五张圣诞纹样：圣诞树和雪人、姜饼人、绿色挂饰、驯鹿、红底雪花，统一手绘风格'
     const prompts = Array.from({ length: 5 }, (_, index) => createIndependentImagePrompt(prompt, index, 5))

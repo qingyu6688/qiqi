@@ -478,7 +478,7 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
   const results = await settleWithConcurrency(
     Array.from({ length: n }), getImageRequestConcurrency(), (_, requestIndex) => callImagesApiSingle({
       ...singleOpts,
-      prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n),
+      prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n, opts.settings.galleryImageVariation),
       onPartialImage: opts.onPartialImage
         ? (partial) => opts.onPartialImage?.({ ...partial, requestIndex })
         : undefined,
@@ -1049,7 +1049,7 @@ async function callCustomHttpImageApiConcurrent(
 ): Promise<CallApiResult> {
   const results = await settleWithConcurrency(Array.from({ length: n }), getImageRequestConcurrency(), (_, requestIndex) => callCustomHttpImageApi({
     ...opts,
-    prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n),
+    prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n, opts.settings.galleryImageVariation),
     params: { ...opts.params, n: 1 },
   }, profile, customProvider))
   return mergeConcurrentApiResults(results)
@@ -1063,7 +1063,7 @@ async function callResponsesImageApi(opts: CallApiOptions, profile: ApiProfile):
 
   const results = await settleWithConcurrency(Array.from({ length: n }), getImageRequestConcurrency(), (_, requestIndex) => callResponsesImageApiSingle({
     ...opts,
-    prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n),
+    prompt: createIndependentImagePrompt(opts.prompt, requestIndex, n, opts.settings.galleryImageVariation),
     params: { ...opts.params, n: 1 },
     onPartialImage: opts.onPartialImage
       ? (partial) => opts.onPartialImage?.({ ...partial, requestIndex })

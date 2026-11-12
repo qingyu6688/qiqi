@@ -13,7 +13,7 @@ const ROW_CLASS = 'relative flex items-center justify-between gap-3'
 const ROW_LABEL_CLASS = 'text-gray-500 dark:text-gray-400'
 const CONTROL_DISABLED_CLASS = 'px-3 py-1.5 rounded-xl border border-transparent bg-black/[0.04] dark:bg-white/[0.04] opacity-50 cursor-not-allowed text-xs transition-all duration-200'
 
-type BatchSettingsPatch = Partial<Pick<AppSettings, 'batchPromptEnabled' | 'batchPromptMode' | 'batchPromptConcurrencyLimited' | 'batchPromptConcurrency'>>
+type BatchSettingsPatch = Partial<Pick<AppSettings, 'batchPromptEnabled' | 'batchPromptMode' | 'batchPromptConcurrencyLimited' | 'batchPromptConcurrency' | 'galleryImageVariation'>>
 
 function Switch({ checked, disabled, label, onToggle }: { checked: boolean; disabled?: boolean; label: string; onToggle: () => void }) {
   return (
@@ -118,6 +118,7 @@ export default function InputParamsPanel({
   moderationDisabled,
   agentAutoImageCount,
   agentMode,
+  galleryImageVariation = 'preserve',
   agentImageCount,
   onAgentImageCountChange,
   outputImageLimit,
@@ -171,6 +172,7 @@ export default function InputParamsPanel({
   moderationDisabled: boolean
   agentAutoImageCount: boolean
   agentMode: boolean
+  galleryImageVariation?: AppSettings['galleryImageVariation']
   agentImageCount: AppSettings['agentImageCount']
   onAgentImageCountChange: (count: AppSettings['agentImageCount']) => void
   outputImageLimit: number
@@ -207,6 +209,7 @@ export default function InputParamsPanel({
       ? `透明 ${transparentOutputEnabled}`
       : compressionDisabled ? null : `压缩 ${outputCompressionInput || '默认'}`,
     moderationDisabled ? null : `审核 ${params.moderation}`,
+    !agentMode && params.n > 1 ? (galleryImageVariation === 'vary' ? '每张换方案' : '同一方案') : null,
   ].filter(Boolean).join(' · ')
   const prefix = (text: string) => <span className="mr-1.5 text-gray-400 dark:text-gray-500">{text}</span>
 
@@ -334,6 +337,17 @@ export default function InputParamsPanel({
         <ButtonTooltip visible={streamConcurrentByN && streamConcurrentHint.visible && !nLimitHint.visible} text="数量大于 1 时会将多图生成拆分为并发单图" />
       </label>}
       <ParamPopoverChip label="更多" summary={moreSummary} className="sm:min-w-[5rem]">
+            {!agentMode && (
+              <div className={ROW_CLASS}>
+                <span className={ROW_LABEL_CLASS}>多图方案</span>
+                <div className="w-36">
+                  <Select value={galleryImageVariation} onChange={(value) => onBatchChange({ galleryImageVariation: value as 'preserve' | 'vary' })} options={[
+                    { label: '保持同一方案', value: 'preserve' },
+                    { label: '每张换一种方案', value: 'vary' },
+                  ]} className={selectClass} />
+                </div>
+              </div>
+            )}
             <div className={ROW_CLASS}>
               <span className={ROW_LABEL_CLASS}>格式</span>
               <div className="w-28">

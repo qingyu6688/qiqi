@@ -193,6 +193,8 @@ export interface AppSettings {
   agentImageCount: 'auto' | number
   agentWebSearch: boolean
   agentMathFormattingPrompt: boolean
+  agentCustomInstructions?: string
+  galleryImageVariation?: 'preserve' | 'vary'
   agentApiConfigMode: AgentApiConfigMode
   agentTextProfileId?: string | null
   agentImageProfileId?: string | null
@@ -263,6 +265,7 @@ export interface TaskRecord {
   params: TaskParams
   /** 异步接口逐张生成时的组内序号与原始数量，序号从 0 开始。 */
   independentImage?: { index: number; total: number }
+  galleryImageVariation?: 'preserve' | 'vary'
   /** 生成时使用的 Provider 类型 */
   apiProvider?: ApiProvider
   /** 生成时使用的 API 配置 ID */
@@ -405,6 +408,7 @@ export interface RequestConnectionState {
 export interface AgentConversation {
   id: string
   title: string
+  instructions?: string
   activeRoundId?: string | null
   createdAt: number
   updatedAt: number

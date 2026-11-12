@@ -15,6 +15,7 @@ import { downloadImageEntriesAsZip, downloadImageIds, getDownloadErrorMessage, g
 import { useVisibleAgentConversations } from '../hooks/usePrivacyMode'
 import TaskCard from './TaskCard'
 import AgentRoundProgress from './AgentRoundProgress'
+import AgentInstructionsEditor from './AgentInstructionsEditor'
 import { CommentBadge } from './CommentMarks'
 import MarkdownRenderer from './MarkdownRenderer'
 import { TooltipButton as AgentActionButton } from './TooltipButton'
@@ -124,6 +125,7 @@ export default function AgentWorkspace() {
   const createConversation = useStore((s) => s.createAgentConversation)
   const setActiveConversationId = useStore((s) => s.setActiveAgentConversationId)
   const renameConversation = useStore((s) => s.renameAgentConversation)
+  const setConversationInstructions = useStore((s) => s.setAgentConversationInstructions)
   const deleteConversation = useStore((s) => s.deleteAgentConversation)
   const deleteAgentRound = useStore((s) => s.deleteAgentRound)
   const deleteAgentAssistantMessage = useStore((s) => s.deleteAgentAssistantMessage)
@@ -758,6 +760,7 @@ export default function AgentWorkspace() {
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
         >
+          {conversation && <AgentInstructionsEditor key={conversation.id} title="对话设定" description="仅用于当前对话，可保存角色外观、画风和禁止项。" value={conversation.instructions ?? ''} onSave={(value) => setConversationInstructions(conversation.id, value)} />}
           {!conversation ? (
             <div className="py-20 text-center text-gray-400">
               <CatCompanion />

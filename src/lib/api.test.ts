@@ -23,6 +23,17 @@ describe('API error hints', () => {
 })
 
 describe('callImageApi', () => {
+  it.each(['preserve', 'vary'] as const)('画廊同步多图请求使用用户选择的方案模式：%s', async (galleryImageVariation) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ data: [{ b64_json: 'aW1hZ2U=' }] }), { headers: { 'Content-Type': 'application/json' } }))
+    await callImageApi({ settings: { ...DEFAULT_SETTINGS, apiKey: 'mock-key', streamImages: false, galleryImageVariation }, prompt: '蓝色背景，猫在左侧，不要文字', params: { ...DEFAULT_PARAMS, n: 2 }, inputImageDataUrls: [] })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    for (const [, request] of fetchMock.mock.calls) {
+      const body = JSON.parse(String(request?.body))
+      expect(body.prompt).toContain(galleryImageVariation === 'vary' ? '变化构图或细节' : '保持同一方案及构图')
+      expect(body.prompt).toContain('蓝色背景，猫在左侧，不要文字')
+      expect(body.n).toBe(1)
+    }
+  })
   it('画廊多批和对话单图共用两个请求名额', async () => {
     let active = 0
     let peak = 0

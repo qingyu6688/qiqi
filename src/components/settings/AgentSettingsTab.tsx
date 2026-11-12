@@ -8,6 +8,8 @@ import { canUseAgentImageQueueProfile, getAgentImageQueueProfiles, normalizeAgen
 import { isPresetAgentFieldLocked } from '../../lib/presetConfig'
 import Select from '../Select'
 import AgentImageQueueEditor from './AgentImageQueueEditor'
+import AgentInstructionsEditor from '../AgentInstructionsEditor'
+import { flushTauriSettings } from '../../lib/tauriStorage'
 
 interface SelectOption {
   label: string
@@ -49,6 +51,10 @@ export default function AgentSettingsTab({
   const queueCandidates = primary ? draft.profiles.filter((profile) => agentImageProfileOptions.some((item) => item.value === profile.id) && canUseAgentImageQueueProfile(profile, primary)) : []
   return (
     <div className="space-y-4">
+      <AgentInstructionsEditor title="全局自定义指令" description="适用于所有生图对话，适合保存常用画风和创作偏好。" value={draft.agentCustomInstructions ?? ''} onSave={async (value) => {
+        commitSettings({ ...draft, agentCustomInstructions: value })
+        await flushTauriSettings()
+      }} />
       {onSaveImageQueue && <AgentImageQueueEditor draft={draft} primary={primary} onSave={onSaveImageQueue} />}
       <div className="rounded-xl bg-blue-500/[0.06] p-3 text-xs leading-relaxed text-gray-600 dark:text-gray-400">
         同一对话会带入当前分支的历史文字和图片。对话保存在本机，关闭后可继续；新建对话会开启独立上下文。网页版和桌面版各自保存，可通过备份导入导出迁移。

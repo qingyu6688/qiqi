@@ -157,6 +157,67 @@ const callBatchImageSingleImplementation = vi.mocked(callBatchImageSingle).getMo
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 const imageB = { id: 'image-b', dataUrl: 'data:image/png;base64,b' }
 
+describe('对话原话、固定设定与参考图兜底', () => {
+  const textProfile = createDefaultOpenAIProfile({ id: 'text', apiKey: 'mock-text', apiMode: 'responses', streamImages: false })
+  const imageProfile = createDefaultOpenAIProfile({ id: 'image', apiKey: 'mock-image', apiMode: 'images', streamImages: false })
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    vi.mocked(callAgentResponsesApi).mockReset()
+    vi.mocked(callImageApi).mockReset().mockResolvedValue({ images: ['data:image/png;base64,result'], revisedPrompts: ['服务商精简后的提示词'] })
+    useStore.setState({
+      privacyMode: null, tasks: [], inputImages: [], maskDraft: null, agentEditingRoundId: null,
+      activeAgentConversationId: 'guidance', agentInputDrafts: {}, appMode: 'agent', params: { ...DEFAULT_PARAMS }, prompt: '',
+      agentConversations: [{ id: 'guidance', title: '设定测试', createdAt: 1, updatedAt: 1, rounds: [], messages: [] }],
+      settings: normalizeSettings({ profiles: [textProfile, imageProfile], activeProfileId: textProfile.id, agentApiConfigMode: 'hybrid', agentTextProfileId: textProfile.id, agentImageProfileId: imageProfile.id, agentCustomInstructions: '水彩画风', agentMaxToolRounds: 15 }),
+      showToast: vi.fn(),
+    })
+  })
+
+  it.each(['generate_image', 'generate_image_batch'])('%s 漏写引用时仍将本轮参考图发送给生图接口', async (tool) => {
+    await putImage(imageA)
+    useStore.setState({ prompt: '保持这个角色，背景改成蓝色，不要文字', inputImages: [imageA] })
+    vi.mocked(callAgentResponsesApi)
+      .mockResolvedValueOnce({ text: '', images: [], outputItems: [{ type: 'function_call', name: tool, call_id: 'ref-fallback', arguments: JSON.stringify(tool === 'generate_image' ? { prompt: '白猫在海边' } : { images: [{ id: 'a', prompt: '白猫在海边' }] }) }] })
+      .mockResolvedValueOnce({ text: '完成', images: [], outputItems: [] })
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0].rounds[0]?.status).toBe('done'))
+    const request = vi.mocked(callImageApi).mock.calls[0][0]
+    expect(request.inputImageDataUrls).toEqual([imageA.dataUrl])
+    expect(request.prompt).toContain('背景改成蓝色，不要文字')
+    expect(useStore.getState().tasks[0].inputImageIds).toHaveLength(1)
+    expect(useStore.getState().tasks[0].prompt).toContain('背景改成蓝色，不要文字')
+    expect(Object.values(useStore.getState().tasks[0].revisedPromptByImage ?? {})).toEqual(['服务商精简后的提示词'])
+  })
+
+  it('固定设定保存后，连续八轮的文本规划和第八轮三张实际图片请求都保留设定及原话', async () => {
+    await useStore.getState().setAgentConversationInstructions('guidance', '戴蓝围巾的白猫')
+    expect((await getAllAgentConversations())[0].instructions).toBe('戴蓝围巾的白猫')
+    for (let index = 0; index < 7; index++) {
+      useStore.setState({ prompt: '讨论场景' })
+      vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({ text: '场景确认', images: [], outputItems: [] })
+      await submitAgentMessage()
+      await vi.waitFor(() => expect(useStore.getState().agentConversations[0].rounds[index]?.status).toBe('done'))
+    }
+    const original = '画这个角色在海边，生成三张，文字“柒柒”，蓝色背景，右下角两只贝壳，不要边框'
+    useStore.setState({ prompt: original })
+    vi.mocked(callAgentResponsesApi)
+      .mockResolvedValueOnce({ text: '', images: [], outputItems: [{ type: 'function_call', name: 'generate_image_batch', call_id: 'three', arguments: JSON.stringify({ images: [1, 2, 3].map((id) => ({ id: String(id), prompt: `海边方案 ${id}` })) }) }] })
+      .mockResolvedValueOnce({ text: '完成', images: [], outputItems: [] })
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0].rounds[7]?.status).toBe('done'))
+    expect(callImageApi).toHaveBeenCalledTimes(3)
+    for (const [request] of vi.mocked(callAgentResponsesApi).mock.calls) expect(request.conversationInstructions).toBe('戴蓝围巾的白猫')
+    for (const [request] of vi.mocked(callImageApi).mock.calls) {
+      expect(request.prompt).toContain(original)
+      expect(request.prompt).toContain('戴蓝围巾的白猫')
+      expect(request.prompt).toContain('水彩画风')
+    }
+    expect(useStore.getState().tasks.every((task) => task.prompt.includes(original))).toBe(true)
+  })
+})
+
 describe('画廊异步接口独立出图', () => {
   beforeEach(async () => {
     await clearTasks()
@@ -177,7 +238,7 @@ describe('画廊异步接口独立出图', () => {
 
   it.each(['sb2api-async', 'fal'] as const)('%s 的四图请求拆成四个单图任务，各自保留队列 ID 和重试序号', async (provider) => {
     const profile = createDefaultOpenAIProfile({ id: 'image-profile', provider, apiKey: 'mock-key', model: 'mock-image' })
-    useStore.setState({ settings: normalizeSettings({ profiles: [profile], activeProfileId: profile.id }) })
+    useStore.setState({ settings: normalizeSettings({ profiles: [profile], activeProfileId: profile.id, galleryImageVariation: 'vary' }) })
     let requestIndex = 0
     vi.mocked(callImageApi).mockImplementation(async (opts) => {
       const index = requestIndex++
@@ -202,11 +263,14 @@ describe('画廊异步接口独立出图', () => {
     expect(stored.every((item) => item.status === 'done' && item.outputImages.length === 1 && item.params.n === 1)).toBe(true)
 
     const original = useStore.getState().tasks[0]
+    useStore.getState().setSettings({ galleryImageVariation: 'preserve' })
     await retryTask(original)
     await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(5))
     const retried = vi.mocked(callImageApi).mock.calls[4][0]
     expect(retried.prompt).toContain(`第 ${original.independentImage!.index + 1} 张，共 4 张`)
     expect(retried.params.n).toBe(1)
+    expect(retried.prompt).toContain('变化构图或细节')
+    expect(retried.prompt).not.toContain('保持同一方案及构图')
     await reuseConfig(original)
     expect(useStore.getState().params.n).toBe(4)
     expect(useStore.getState().prompt).toBe(original.prompt)
@@ -534,7 +598,8 @@ describe('error toast messages', () => {
     await regenerateAgentAssistantMessage(conversation.id, round.id)
     await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.status).toBe('done'))
     expect(vi.mocked(callAgentResponsesApi).mock.calls.map(([request]) => request.remainingImageCount)).toEqual([5, 3, 3, 1])
-    expect(vi.mocked(callImageApi).mock.calls.map(([request]) => request.prompt)).toEqual(['海报 1', '海报 2', '海报 2', '海报 3', '海报 4', '海报 5'])
+    expect(vi.mocked(callImageApi).mock.calls.map(([request]) => request.prompt.split('\n')[0])).toEqual(['海报 1', '海报 2', '海报 2', '海报 3', '海报 4', '海报 5'])
+    expect(vi.mocked(callImageApi).mock.calls.every(([request]) => request.prompt.includes('生成五张不同的海报'))).toBe(true)
     expect(useStore.getState().agentConversations[0].rounds[0].outputTaskIds.slice(0, 2)).toEqual(firstIds)
   })
 
@@ -4994,7 +5059,7 @@ describe('agent built-in image tool failure', () => {
 
     await submitAgentMessage()
     await vi.waitFor(() => expect(useStore.getState().tasks.filter((item) => item.agentBatchCallId === 'hybrid-batch-call')).toHaveLength(2))
-    const deletedTask = useStore.getState().tasks.find((item) => item.prompt === 'deleted prompt')
+    const deletedTask = useStore.getState().tasks.find((item) => item.prompt.startsWith('deleted prompt'))
     expect(deletedTask).toBeDefined()
     expect(deletedTask).toMatchObject({ agentBatchCallId: 'hybrid-batch-call' })
     await removeTask(deletedTask!)
@@ -5011,7 +5076,7 @@ describe('agent built-in image tool failure', () => {
     expect(continuationInput).toContain('Tool-call budget: 1/3 used.')
     await vi.waitFor(() => expect(useStore.getState().agentConversations[0].rounds[0]?.status).toBe('done'))
     expect(useStore.getState().tasks).toHaveLength(1)
-    expect(useStore.getState().tasks[0]).toMatchObject({ prompt: 'live prompt', status: 'done' })
+    expect(useStore.getState().tasks[0]).toMatchObject({ prompt: expect.stringContaining('live prompt'), status: 'done' })
     const finalOutput = JSON.stringify(useStore.getState().agentConversations[0].rounds[0].responseOutput)
     expect(finalOutput).not.toContain('deleted-item')
     expect(finalOutput).toContain('live-item')
@@ -5083,7 +5148,7 @@ describe('agent built-in image tool failure', () => {
     expect(JSON.parse(typeof functionOutput?.output === 'string' ? functionOutput.output : '{}').images.map((item: { id: string }) => item.id)).toEqual(['duplicate', 'duplicate_2', 'image_3', 'image_4'])
     const continuationInput = JSON.stringify(vi.mocked(callAgentResponsesApi).mock.calls[1][0].input)
     expect(continuationInput).toContain('duplicate_2')
-    expect(continuationInput).not.toContain(' duplicate ')
+    expect(continuationInput).not.toContain('\\\"id\\\":\\\" duplicate \\\"')
     expect(continuationInput).not.toContain('ignored')
   })
 

@@ -2,6 +2,7 @@ import type { AgentConversation, AgentMessage, AgentRound, TaskRecord } from '..
 import { MAX_AGENT_IMAGES_PER_ROUND } from '../types'
 import { stripImageMentionMarkers } from './promptImageMentions'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
+import { normalizeAgentInstructions } from './agentGuidance'
 
 const AGENT_ROUND_IMAGE_MENTION_RE = /@(?:第)?(\d+)轮图(\d+)/g
 
@@ -125,6 +126,7 @@ export function normalizeAgentConversations(value: unknown): AgentConversation[]
       return {
         id: conversation.id,
         title: typeof conversation.title === 'string' && conversation.title.trim() ? conversation.title : '新对话',
+        ...(normalizeAgentInstructions(conversation.instructions) ? { instructions: normalizeAgentInstructions(conversation.instructions) } : {}),
         activeRoundId: typeof conversation.activeRoundId === 'string' && roundIds.has(conversation.activeRoundId) ? conversation.activeRoundId : rounds[rounds.length - 1]?.id ?? null,
         createdAt: typeof conversation.createdAt === 'number' ? conversation.createdAt : Date.now(),
         updatedAt: typeof conversation.updatedAt === 'number' ? conversation.updatedAt : Date.now(),

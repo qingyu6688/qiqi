@@ -1,10 +1,26 @@
 import type { AgentRound, TaskRecord } from '../types'
-import { replaceImageMentionsForApi, stripImageMentionMarkers } from './promptImageMentions'
+import { getTaskPromptText, replaceImageMentionsForApi, stripImageMentionMarkers } from './promptImageMentions'
 
 const AGENT_ROUND_IMAGE_REFERENCE_RE = /@(?:第)?(\d+)轮图(\d+)/g
 const AGENT_REF_TAG_RE = /<ref\b[^>]*\bid=(["'])(round-(\d+)-(?:image|reference)-(\d+))\1[^>]*\/?>/g
 
 export const LOCAL_REFERENCE_BATCH_PREFIX = 'local-reference-batch-'
+
+/** 原话用于核对细节，图像范围仍由每张图自己的计划决定。 */
+export function preserveAgentImageRequirements(plannedPrompt: string, userPrompt: string, referenceCount: number, guidance = ''): string {
+  const original = getTaskPromptText(userPrompt, referenceCount).trim()
+  return [
+    plannedPrompt,
+    ...(original && !plannedPrompt.includes(original) ? [`本张只生成上方计划的一张独立图片。请用下面的原话核对并保留本张相关的文字、颜色、元素数量、构图和禁止项。其他图片的主题不画进本张，参考图以实际附图为准。\n用户原始要求：\n${original}`] : []),
+    ...(guidance ? [guidance] : []),
+  ].join('\n\n')
+}
+
+/** 显式引用优先；漏写标签时沿用本轮上传的参考图。 */
+export function getAgentImageReferenceIds(prompt: string, round: AgentRound): string[] {
+  const explicit = extractAgentReferenceIds(prompt)
+  return [...new Set(explicit.length ? explicit : round.inputImageIds.map((_, index) => getAgentCurrentReferenceId(round, index)))]
+}
 
 /** 只在用户明确要求逐图生成且数量相符时，绕过文本规划。 */
 export function createAgentReferenceBatch(prompt: string, referenceCount: number, count: number | 'auto' | undefined, hasMask: boolean): Array<{ id: string; prompt: string }> | null {

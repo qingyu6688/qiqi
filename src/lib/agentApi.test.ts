@@ -3,6 +3,26 @@ import { DEFAULT_PARAMS } from '../types'
 import { createDefaultOpenAIProfile, DEFAULT_SETTINGS } from './apiProfiles'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments } from './agentApi'
 
+it('固定设定放入每次请求的 instructions，不依赖历史文字和图片预算', async () => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ output: [] }), { headers: { 'Content-Type': 'application/json' } }))
+  try {
+    await callAgentResponsesApi({
+      settings: { ...DEFAULT_SETTINGS, agentApiConfigMode: 'hybrid', agentCustomInstructions: '水彩画风，不要边框' },
+      conversationInstructions: '戴蓝围巾的白猫',
+      profile: createDefaultOpenAIProfile({ apiKey: 'mock-key', apiMode: 'responses', streamImages: false }),
+      params: DEFAULT_PARAMS,
+      input: [{ role: 'user', content: '画这个角色在海边' }],
+    })
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body))
+    expect(body.instructions).toContain('水彩画风，不要边框')
+    expect(body.instructions).toContain('戴蓝围巾的白猫')
+    expect(body.instructions).toContain('逐条保留本张适用的文字原文')
+    expect(body.instructions).toContain('客户端会从本机读取对应图片')
+  } finally {
+    fetchMock.mockRestore()
+  }
+})
+
 it.each([false, true])('对话接口返回 504 时给出中文说明且不自动重发，流式=%s', async (streamImages) => {
   const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('<html><title>504 Gateway Time-out</title><body>openresty</body></html>', { status: 504 }))
   try {

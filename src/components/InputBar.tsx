@@ -1746,6 +1746,7 @@ export default function InputBar() {
       batchMode={settings.batchPromptMode}
       batchConcurrencyLimited={settings.batchPromptConcurrencyLimited}
       batchConcurrency={settings.batchPromptConcurrency}
+      galleryImageVariation={settings.galleryImageVariation}
       batchPromptCount={batchPromptCount}
       batchProgress={batchProgress}
       onBatchChange={setSettings}

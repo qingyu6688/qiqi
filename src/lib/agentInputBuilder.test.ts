@@ -63,6 +63,38 @@ function conversation(rounds: AgentRound[], messages: AgentMessage[]): AgentConv
 const noImage = async () => undefined
 
 describe('agent input builder', () => {
+  it('八张历史生成图都保留编号及描述，只附最近四张像素', async () => {
+    const first = round('round-1', 1, { outputTaskIds: ['images'] })
+    const current = round('round-2', 2, { status: 'running' })
+    const images = Array.from({ length: 8 }, (_, index) => `image-${index + 1}`)
+    const input = await buildAgentApiInput({
+      conversation: conversation([first, current], [message(first, '白猫'), message(current, '继续用第一张')]),
+      currentRound: current,
+      tasks: [task('images', { prompt: '戴蓝色围巾的白猫', outputImages: images })],
+      loadImage: async (id) => `data:${id}`,
+    })
+    const serialized = JSON.stringify(input)
+    for (let index = 1; index <= 8; index++) expect(serialized).toContain(`round-1-image-${index}`)
+    expect(serialized.match(/戴蓝色围巾的白猫/g)).toHaveLength(8)
+    expect(serialized.match(/"type":"input_image"/g)).toHaveLength(4)
+    expect(serialized).not.toContain('data:image-1')
+    expect(serialized).toContain('data:image-8')
+  })
+
+  it('旧轮摘录保留开头和结尾，且不修改本地完整记录', async () => {
+    const rounds = Array.from({ length: 9 }, (_, index) => round(`round-${index + 1}`, index + 1))
+    const original = `开头角色白猫${'中间内容'.repeat(1000)}末尾禁止红色背景`
+    const messages = rounds.map((item, index) => message(item, index === 0 ? original : '继续'))
+    messages.push(message(rounds[0], `开头确认${'过程'.repeat(900)}结尾确认水彩`, { id: 'assistant-old', role: 'assistant' }))
+    rounds[0].assistantMessageId = 'assistant-old'
+    const input = await buildAgentApiInput({ conversation: conversation(rounds, messages), currentRound: rounds[8], tasks: [], loadImage: noImage })
+    const text = JSON.stringify(input)
+    expect(text).toContain('开头角色白猫')
+    expect(text).toContain('末尾禁止红色背景')
+    expect(text).toContain('结尾确认水彩')
+    expect(text).toContain('中间内容已摘录')
+    expect(messages[0].content).toBe(original)
+  })
   it('builds a normal current-round user input', async () => {
     const currentRound = round('round-1', 1, { status: 'running', finishedAt: null })
 
@@ -485,7 +517,7 @@ describe('agent input builder', () => {
 
     expect(JSON.stringify(input)).toContain('data:current-image')
     expect(JSON.stringify(input)).not.toContain('data:image/png;base64,')
-    expect(onContextCompacted).toHaveBeenCalledWith(expect.stringContaining('未附像素'))
+    expect(onContextCompacted).toHaveBeenCalledWith(expect.stringContaining('仍保留编号和已有提示词'))
   })
 
   it('当前输入或明确附件过大时给出可操作错误，不静默删减', async () => {

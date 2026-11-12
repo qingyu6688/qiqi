@@ -86,22 +86,20 @@ function createGeneratedImageReferencePart(round: AgentRound, task: TaskRecord, 
   }
 }
 
-async function createGeneratedImagesInputItem(round: AgentRound, tasks: TaskRecord[], loadImage: LoadImage, includedImages?: Set<string>, includeRemoved = true) {
+async function createGeneratedImagesInputItem(round: AgentRound, tasks: TaskRecord[], loadImage: LoadImage) {
   const content: Array<{ type: string; text?: string; image_url?: string }> = []
   let imageIndex = 0
   for (const taskId of round.outputTaskIds) {
     const task = tasks.find((item) => item.id === taskId)
     if (!task) {
-      if (includeRemoved) content.push({ type: 'input_text', text: `<removed_ref id="${getAgentGeneratedImageReferenceId(round, imageIndex)}" />` })
+      content.push({ type: 'input_text', text: `<removed_ref id="${getAgentGeneratedImageReferenceId(round, imageIndex)}" />` })
       imageIndex += 1
       continue
     }
     for (const imageId of task.outputImages) {
-      if (!includedImages || includedImages.has(imageId)) {
-        const dataUrl = await loadImage(imageId)
-        if (dataUrl) content.push({ type: 'input_image', image_url: dataUrl })
-        content.push(createGeneratedImageReferencePart(round, task, imageIndex))
-      }
+      const dataUrl = await loadImage(imageId)
+      if (dataUrl) content.push({ type: 'input_image', image_url: dataUrl })
+      content.push(createGeneratedImageReferencePart(round, task, imageIndex))
       imageIndex += 1
     }
   }
@@ -110,21 +108,17 @@ async function createGeneratedImagesInputItem(round: AgentRound, tasks: TaskReco
 
 async function createBatchImagesInputItem(round: AgentRound, tasks: TaskRecord[], batchTaskIds: string[], loadImage: LoadImage) {
   const content: Array<{ type: string; text?: string; image_url?: string }> = []
-  let baseImageIndex = 0
+  const batchIds = new Set(batchTaskIds)
+  let imageIndex = 0
   for (const taskId of round.outputTaskIds) {
-    if (batchTaskIds.includes(taskId)) break
     const task = tasks.find((item) => item.id === taskId)
-    baseImageIndex += task ? task.outputImages.length : 1
-  }
-
-  let imageIndex = baseImageIndex
-  for (const taskId of batchTaskIds) {
-    const task = tasks.find((item) => item.id === taskId)
-    if (!task || task.status !== 'done') continue
+    if (!task) { imageIndex += 1; continue }
     for (const imageId of task.outputImages) {
-      const dataUrl = await loadImage(imageId)
-      if (dataUrl) content.push({ type: 'input_image', image_url: dataUrl })
-      content.push(createGeneratedImageReferencePart(round, task, imageIndex))
+      if (batchIds.has(taskId) && task.status === 'done') {
+        const dataUrl = await loadImage(imageId)
+        if (dataUrl) content.push({ type: 'input_image', image_url: dataUrl })
+        content.push(createGeneratedImageReferencePart(round, task, imageIndex))
+      }
       imageIndex += 1
     }
   }
@@ -152,8 +146,16 @@ function serializedTextLength(input: unknown): number {
   return JSON.stringify(input, (key, value: unknown) => key === 'image_url' ? '' : value).length
 }
 
+function getHistoryExcerpt(text: string): string {
+  if (text.length <= HISTORY_EXCERPT_LENGTH) return text
+  const marker = '\n……（中间内容已摘录）……\n'
+  const half = Math.floor((HISTORY_EXCERPT_LENGTH - marker.length) / 2)
+  return text.slice(0, half) + marker + text.slice(-half)
+}
+
 function getAssistantExcerpt(conversation: AgentConversation, round: AgentRound): string {
-  return conversation.messages.find((message) => message.id === round.assistantMessageId)?.content.slice(0, HISTORY_EXCERPT_LENGTH) || '本轮没有保存文字回复。'
+  const text = conversation.messages.find((message) => message.id === round.assistantMessageId)?.content
+  return text ? getHistoryExcerpt(text) : '本轮没有保存文字回复。'
 }
 
 async function loadContextImages(requiredIds: Set<string>, optionalIds: string[], loadImage: LoadImage): Promise<Map<string, string>> {
@@ -228,7 +230,7 @@ export async function buildAgentApiInput(options: BuildAgentApiInputOptions): Pr
     if (reverseIndex >= FULL_HISTORY_ROUNDS || serializedTextLength(items) > remainingText) {
       compactedRounds += 1
       items = [
-        { role: 'user', content: [{ type: 'input_text', text: `第 ${round.index} 轮用户消息摘录（可能不完整）：\n${userMessage.content.slice(0, HISTORY_EXCERPT_LENGTH)}` }] },
+        { role: 'user', content: [{ type: 'input_text', text: `第 ${round.index} 轮用户消息摘录（可能不完整）：\n${getHistoryExcerpt(userMessage.content)}` }] },
         createAssistantFallbackItem(`第 ${round.index} 轮助手回复摘录（可能不完整）：\n${getAssistantExcerpt(options.conversation, round)}`),
       ]
     }
@@ -244,17 +246,18 @@ export async function buildAgentApiInput(options: BuildAgentApiInputOptions): Pr
     const referenceContent: Array<{ type: string; image_url?: string; text?: string }> = []
     for (const [index, id] of round.inputImageIds.entries()) {
       const dataUrl = await loadHistoryImage(id)
-      if (dataUrl) referenceContent.push({ type: 'input_image', image_url: dataUrl }, { type: 'input_text', text: `<ref id="${getAgentCurrentReferenceId(round, index)}" />` })
+      if (dataUrl) referenceContent.push({ type: 'input_image', image_url: dataUrl })
+      referenceContent.push({ type: 'input_text', text: `<ref id="${getAgentCurrentReferenceId(round, index)}" />` })
     }
     if (referenceContent.length > 0) input.push({ role: 'user', content: referenceContent })
-    const imagesItem = await createGeneratedImagesInputItem(round, options.tasks, loadHistoryImage, includedImages, Boolean(block))
+    const imagesItem = await createGeneratedImagesInputItem(round, options.tasks, loadHistoryImage)
     if (imagesItem) input.push(imagesItem)
   }
   const omittedImages = new Set(historyImageIds.filter((id) => !includedImages.has(id))).size
   if (compactedRounds > 0 || omittedImages > 0) {
     const notice = [
       compactedRounds > 0 ? `${compactedRounds} 轮较早或过长的历史文字已按预算摘录或省略` : '',
-      omittedImages > 0 ? `${omittedImages} 张未明确引用的历史图片未附像素` : '',
+      omittedImages > 0 ? `${omittedImages} 张历史图片未附图片内容，仍保留编号和已有提示词，可继续引用` : '',
       '完整记录仍保留在本机；需要旧细节时请重新说明或引用图片。',
     ].filter(Boolean).join('；')
     options.onContextCompacted?.(notice)

@@ -26,6 +26,7 @@ import { isImportableConfigUrl } from './importableConfigUrl'
 import { DEFAULT_IMAGES_MODEL } from './imageModels'
 import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } from './batchPrompts'
 import { normalizeFontMode } from './fonts'
+import { normalizeAgentInstructions } from './agentGuidance'
 import { DEFAULT_PRIVACY_MODE_SHORTCUT, normalizeShortcutSetting } from './keyboardShortcut'
 
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
@@ -763,6 +764,8 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
       ? Math.max(1, Math.min(10, Math.trunc(record.agentImageCount))) : 'auto',
     agentWebSearch: typeof record.agentWebSearch === 'boolean' ? record.agentWebSearch : false,
     agentMathFormattingPrompt: typeof record.agentMathFormattingPrompt === 'boolean' ? record.agentMathFormattingPrompt : true,
+    agentCustomInstructions: normalizeAgentInstructions(record.agentCustomInstructions),
+    galleryImageVariation: record.galleryImageVariation === 'vary' ? 'vary' : 'preserve',
     agentApiConfigMode,
     agentTextProfileId,
     agentImageProfileId,
