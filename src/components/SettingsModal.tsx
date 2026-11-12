@@ -7,6 +7,7 @@ import { hasActiveDataOperations, trackDataTransfer } from '../lib/dataOperation
 import { useSettingsDataTransfer } from '../lib/dataProgress'
 import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from '../lib/devProxy'
 import { isTauri } from '../lib/platform'
+import { flushTauriSettings, getTauriStorageLoadError } from '../lib/tauriStorage'
 import { useStore, exportData, importData, clearData, type SettingsTab } from '../store'
 import {
   createDefaultOpenAIProfile,
@@ -35,6 +36,7 @@ import {
   getDefaultPresetProfileId,
   getPresetProfileDescription,
   getPresetProfileIds,
+  isPresetAgentFieldLocked,
   isPresetConfigDeletionPrevented,
   isPresetConfigOnlyEnabled,
   isPresetProvider,
@@ -470,6 +472,13 @@ export default function SettingsModal() {
     })
     setSettings(normalizedDraft)
     setDraft(useStore.getState().settings)
+  }
+
+  const canEditImageQueue = isTauri && !presetConfigOnly && !isPresetAgentFieldLocked('imageProfileId') && !isPresetAgentFieldLocked('apiConfigMode')
+  const saveImageQueue = async (nextDraft: AppSettings): Promise<void> => {
+    if (getTauriStorageLoadError()) throw new Error('本地设置读取失败，请修复后再保存。')
+    commitSettings(nextDraft)
+    await flushTauriSettings()
   }
 
   const setZipDownloadRouteEnabled = (route: ZipDownloadRoute, enabled: boolean) => {
@@ -1286,11 +1295,20 @@ export default function SettingsModal() {
                 commitSettings={commitSettings}
                 commitAgentMaxToolRounds={commitAgentMaxToolRounds}
                 onOpenTextApi={() => setActiveTab('textApi')}
+                onSaveImageQueue={canEditImageQueue ? saveImageQueue : undefined}
               />
             )}
             
             {activeTab === 'api' && (
               <div className="space-y-4">
+                {canEditImageQueue && (
+                  <button type="button" onClick={() => {
+                    tabScrollTopsRef.current.agent = 0
+                    setActiveTab('agent')
+                  }} className="rounded-xl bg-blue-500/10 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-500/20 dark:text-blue-400">
+                    批量配置图像 API
+                  </button>
+                )}
                 <div>
                   <div className="mb-1.5 flex items-center gap-1.5">
                     <span className="block text-sm text-gray-600 dark:text-gray-300">当前配置</span>

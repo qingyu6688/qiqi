@@ -7,6 +7,7 @@ import {
 import { canUseAgentImageQueueProfile, getAgentImageQueueProfiles, normalizeAgentMaxToolRounds, resolveApiProfileModel } from '../../lib/apiProfiles'
 import { isPresetAgentFieldLocked } from '../../lib/presetConfig'
 import Select from '../Select'
+import AgentImageQueueEditor from './AgentImageQueueEditor'
 
 interface SelectOption {
   label: string
@@ -25,6 +26,7 @@ interface AgentSettingsTabProps {
   commitSettings: (nextDraft: AppSettings) => void
   commitAgentMaxToolRounds: () => void
   onOpenTextApi: () => void
+  onSaveImageQueue?: (nextDraft: AppSettings) => Promise<void>
 }
 
 export default function AgentSettingsTab({
@@ -39,6 +41,7 @@ export default function AgentSettingsTab({
   commitSettings,
   commitAgentMaxToolRounds,
   onOpenTextApi,
+  onSaveImageQueue,
 }: AgentSettingsTabProps) {
   const primary = selectedAgentImageProfile ? resolveApiProfileModel(selectedAgentImageProfile) : null
   const profileIds = draft.agentImageQueueProfileIds ?? []
@@ -46,6 +49,7 @@ export default function AgentSettingsTab({
   const queueCandidates = primary ? draft.profiles.filter((profile) => agentImageProfileOptions.some((item) => item.value === profile.id) && canUseAgentImageQueueProfile(profile, primary)) : []
   return (
     <div className="space-y-4">
+      {onSaveImageQueue && <AgentImageQueueEditor draft={draft} primary={primary} onSave={onSaveImageQueue} />}
       <div className="rounded-xl bg-blue-500/[0.06] p-3 text-xs leading-relaxed text-gray-600 dark:text-gray-400">
         同一对话会带入当前分支的历史文字和图片。对话保存在本机，关闭后可继续；新建对话会开启独立上下文。网页版和桌面版各自保存，可通过备份导入导出迁移。
       </div>
@@ -133,7 +137,7 @@ export default function AgentSettingsTab({
             <fieldset className="space-y-2 rounded-xl border border-black/10 p-3 dark:border-white/10" disabled={isPresetAgentFieldLocked('imageProfileId')}>
               <legend className="px-1 text-sm text-gray-600 dark:text-gray-300">多图队列 API</legend>
               <p className="text-xs leading-5 text-gray-500">
-                主配置始终参与。到 API 配置添加使用不同 Key 的图像配置，读取并选中相同模型，再在这里勾选。当前可用 {queueProfiles.length} 个 Key。启用多个 Key 后，每个 Key 同时处理一张，整批受并发设置限制。
+                当前可用 {queueProfiles.length} 个 Key，含主配置。{onSaveImageQueue ? '也可在下方勾选已有的图像配置。' : '可在下方勾选支持相同模型的图像配置。'}启用多个 Key 后，每个 Key 同时处理一张，整批受并发设置限制。
               </p>
               <div className="space-y-2 text-sm text-gray-700 dark:text-gray-200">
                 <div>{primary.name}（主配置）</div>

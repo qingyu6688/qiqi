@@ -1,6 +1,6 @@
 [package]
 name = "qiqi"
-version = "1.3.0"
+version = "1.4.0"
 description = "柒柒本机图片创作工作台"
 license = "MIT"
 edition = "2021"

@@ -68,7 +68,8 @@ export function flushTauriStorage() {
   return writing
 }
 
-registerStorageSaveHandler('settings', async () => {
+export async function flushTauriSettings(): Promise<void> {
+  if (loadError) throw new Error('本地设置读取失败，请修复后再保存。')
   do {
     await flushTauriStorage()
     // 已排队的写入可能正在保存更新的内容，先等它们完成再判断失败。
@@ -77,7 +78,9 @@ registerStorageSaveHandler('settings', async () => {
       throw new Error('设置尚未保存，请检查磁盘空间和数据目录权限后重试。')
     }
   } while (dirty.size || pendingWrites)
-})
+}
+
+registerStorageSaveHandler('settings', flushTauriSettings)
 
 /** 关闭窗口或安装更新前等待全部持久化；失败或超时均不能继续退出。 */
 export function flushTauriStorageBeforeExit(): Promise<void> {
