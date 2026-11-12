@@ -488,7 +488,7 @@ describe('error toast messages', () => {
     await vi.waitFor(() => expect(useStore.getState().tasks.filter((task) => task.status === 'done')).toHaveLength(5))
   })
 
-  it('文本接口在两张完成后超时，继续只提交剩余三张', async () => {
+  it('首批失败一张且文本接口随后超时，先重试失败卡片后仍续跑剩余三张', async () => {
     await clearTasks()
     const imageProfile = createDefaultOpenAIProfile({ id: 'resume-image', apiKey: 'image-test-key' })
     const textProfile = createDefaultOpenAIProfile({ id: 'resume-text', apiMode: 'responses', apiKey: 'text-test-key' })
@@ -506,17 +506,24 @@ describe('error toast messages', () => {
       .mockRejectedValueOnce(new Error('接口网关等待上游响应超时（HTTP 504）'))
       .mockResolvedValueOnce(batch('next', [3, 4]))
       .mockResolvedValueOnce(batch('last', [5]))
-    vi.mocked(callImageApi).mockReset().mockResolvedValue({ images: ['data:image/png;base64,saved'] })
+    vi.mocked(callImageApi).mockReset()
+      .mockResolvedValueOnce({ images: ['data:image/png;base64,first'] })
+      .mockRejectedValueOnce(new Error('图片接口超时'))
+      .mockResolvedValue({ images: ['data:image/png;base64,saved'] })
     await submitAgentMessage()
     await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.canResumeImagePlan).toBe(true))
     const conversation = useStore.getState().agentConversations[0]
     const round = conversation.rounds[0]
     const firstIds = round.outputTaskIds
     expect(firstIds).toHaveLength(2)
+    const failedTask = useStore.getState().tasks.find((task) => task.id === firstIds[1])!
+    expect(failedTask.status).toBe('error')
+    await retryTask(failedTask)
+    await vi.waitFor(() => expect(useStore.getState().tasks.some((task) => task.agentRetryOfTaskId === failedTask.id && task.status === 'done')).toBe(true))
     await regenerateAgentAssistantMessage(conversation.id, round.id)
     await vi.waitFor(() => expect(useStore.getState().agentConversations[0]?.rounds[0]?.status).toBe('done'))
     expect(vi.mocked(callAgentResponsesApi).mock.calls.map(([request]) => request.remainingImageCount)).toEqual([5, 3, 3, 1])
-    expect(vi.mocked(callImageApi).mock.calls.map(([request]) => request.prompt)).toEqual(['海报 1', '海报 2', '海报 3', '海报 4', '海报 5'])
+    expect(vi.mocked(callImageApi).mock.calls.map(([request]) => request.prompt)).toEqual(['海报 1', '海报 2', '海报 2', '海报 3', '海报 4', '海报 5'])
     expect(useStore.getState().agentConversations[0].rounds[0].outputTaskIds.slice(0, 2)).toEqual(firstIds)
   })
 

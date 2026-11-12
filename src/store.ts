@@ -70,7 +70,7 @@ import { hasActiveDataOperations, isCustomRecoverableTask, isFalRecoverableTask 
 import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, createExportBlob, getExportZipPlan, MAX_EXPORT_ZIP_BYTES, readExportZip, readExportZipFileAsDataUrl, readExportZipManifest } from './lib/exportZip'
 import { getExportImageSizes, readExportImages } from './lib/exportImages'
-import { deleteAgentRoundFromConversation, getActiveAgentRounds, getAgentRoundPath, isEmptyAgentConversation, normalizeAgentConversations, remapAgentRoundMentionsForPathChange, uniqueIds } from './lib/agentConversationState'
+import { deleteAgentRoundFromConversation, getActiveAgentRounds, getAgentRoundPath, getAgentSubmittedImageCount, isEmptyAgentConversation, normalizeAgentConversations, remapAgentRoundMentionsForPathChange, uniqueIds } from './lib/agentConversationState'
 import { canonicalizeBatchFunctionCallArguments, countResponseToolCalls, createReadyAgentRecoveredToolState, getAgentFunctionOutputCallIds, getAgentRecoveredFailureError, getAgentRecoveredToolCallCount, getPersistableAgentConversations, getPersistableRawResponsePayload, mergeResponseOutputItems, scrubResponseOutputForDeletedAgentTasks, scrubTaskRawResponsePayloadForDeletedTasks } from './lib/agentResponseState'
 import { cleanStaleAgentInputDrafts, clearInputDraftState, isEmptyAgentInputDraft, normalizeAgentInputDrafts, remapAgentInputDraftMentionsForPathChange, restoreAgentInputDraftState, restoreGalleryInputDraftState, saveActiveAgentInputDrafts, saveGalleryInputDraft, syncActiveInputDraft, updateInputDraftImages } from './lib/inputDraftState'
 import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, createDefaultFavoriteCollection, deleteFavoriteCollectionState, ensureDefaultFavoriteCollection, getTaskFavoriteCollectionIds, mergeFavoriteCollections, normalizeFavoriteCollectionIds, normalizeFavoriteCollectionName, normalizeFavoriteCollections, normalizeFavoritePatch, normalizeLoadedFavoriteState, resolveDefaultFavoriteCollectionId, sameFavoriteCollectionIds } from './lib/favoriteState'
@@ -2801,7 +2801,7 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
   const roundTasks = state.tasks.filter((task) => task.agentRoundId === sourceRound.id)
   const resumePlan = sourceRound.status === 'error' && sourceRound.canResumeImagePlan === true
     && typeof requestedImageCount === 'number' && sourceRound.outputTaskIds.length > 0
-    && sourceRound.outputTaskIds.length < requestedImageCount && Boolean(sourceRound.responseOutput?.length)
+    && getAgentSubmittedImageCount(sourceRound, roundTasks) < requestedImageCount && Boolean(sourceRound.responseOutput?.length)
     && !roundTasks.some((task) => task.status === 'running' || task.falRecoverable || task.customRecoverable)
   if (resumePlan || (sourceRound.status === 'error' && (sourceRound.requestedImageCount === undefined || sourceRound.outputTaskIds.length === 0))) {
     const assistantMessageId = sourceRound.assistantMessageId
@@ -2931,8 +2931,9 @@ async function executeAgentRound(
     const useMultipleKeys = queueProfiles.length > 1
     const imageParams = normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: round.inputImageIds.length > 0 })
     const streamingTaskIds: string[] = resume ? [...round.outputTaskIds] : []
+    let submittedImageCount = resume ? getAgentSubmittedImageCount(round, latestState.tasks) : 0
     const getRemainingImageCount = () => typeof requestSettings.agentImageCount === 'number'
-      ? Math.max(0, requestSettings.agentImageCount - streamingTaskIds.length) : undefined
+      ? Math.max(0, requestSettings.agentImageCount - submittedImageCount) : undefined
     const taskIdByToolCallId = new Map<string, string>()
     const taskByToolCallId = new Map<string, TaskRecord>()
 
@@ -2953,6 +2954,7 @@ async function executeAgentRound(
     const attachTaskToAgentRound = (taskId: string) => {
       if (streamingTaskIds.includes(taskId)) return
       streamingTaskIds.push(taskId)
+      submittedImageCount += 1
       updateAgentConversation(conversationId, (current) => ({
         ...current,
         updatedAt: Date.now(),
@@ -2986,7 +2988,7 @@ async function executeAgentRound(
         return existingTask.id
       }
 
-      if (streamingTaskIds.length >= MAX_AGENT_IMAGES_PER_ROUND) throw new Error(`本轮已达到 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片的上限，请在下一条消息继续生成。`)
+      if (submittedImageCount >= MAX_AGENT_IMAGES_PER_ROUND) throw new Error(`本轮已达到 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片的上限，请在下一条消息继续生成。`)
       const taskProfile = options.apiProfile ?? imageProfile
       const task: TaskRecord = {
         id: genId(),
@@ -3339,14 +3341,14 @@ async function executeAgentRound(
         return JSON.stringify({ error: 'Invalid or empty batch arguments' })
       }
       const remainingCount = getRemainingImageCount()
-      const remainingBudget = MAX_AGENT_IMAGES_PER_ROUND - streamingTaskIds.length
+      const remainingBudget = MAX_AGENT_IMAGES_PER_ROUND - submittedImageCount
       if (remainingCount === 0) return JSON.stringify({ status: 'done', message: '本轮图片请求数量已用完，未追加请求。' })
       if (batchItems.length > remainingBudget) throw new Error(`本轮最多生成 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片，剩余 ${Math.max(0, remainingBudget)} 张；模型提交了 ${batchItems.length} 张，已停止提交。请减少数量或在下一条消息继续。`)
       if (remainingCount !== undefined && batchItems.length > remainingCount) throw new Error(`文本模型提交了 ${batchItems.length} 张图片任务，超过本轮剩余的 ${remainingCount} 张，已停止提交。请重试或切换文本模型。`)
 
       // Create task cards in model-provided order before starting network calls.
       const batchExecutionItems = []
-      const queueOffset = streamingTaskIds.length
+      const queueOffset = submittedImageCount
       for (const [index, item] of batchItems.entries()) {
         if (controller.signal.aborted) throw createAgentAbortError()
         const referenceIds = ownReferencePerImage ? [getAgentCurrentReferenceId(round, index)] : uniqueIds(extractAgentReferenceIds(item.prompt))
@@ -3522,7 +3524,7 @@ async function executeAgentRound(
       if (reachedToolLimit) break
       const textBeforeResponse = accumulatedText
       let currentResponseOutputItems: ResponsesOutputItem[] = []
-      canResumeImagePlan = typeof requestedImageCount === 'number' && requestedImageCount > streamingTaskIds.length && streamingTaskIds.length > 0
+      canResumeImagePlan = typeof requestedImageCount === 'number' && requestedImageCount > submittedImageCount && submittedImageCount > 0
       const resumableResponseOutput = canResumeImagePlan ? accumulatedOutputItems : undefined
       const result = await callAgentResponsesApi({
         settings: requestSettings,
@@ -3530,7 +3532,7 @@ async function executeAgentRound(
         imageProfile,
         params: imageParams,
         input: apiInputForTurn,
-        imageRequestBudget: Math.max(0, MAX_AGENT_IMAGES_PER_ROUND - streamingTaskIds.length),
+        imageRequestBudget: Math.max(0, MAX_AGENT_IMAGES_PER_ROUND - submittedImageCount),
         ...(getRemainingImageCount() !== undefined ? { remainingImageCount: getRemainingImageCount() } : {}),
         maskDataUrl,
         signal: controller.signal,
@@ -4361,6 +4363,7 @@ export async function retryTask(task: TaskRecord) {
       agentConversationId: sourceConversation.id,
       agentRoundId: sourceRound.id,
       agentMessageId: source.agentMessageId,
+      agentRetryOfTaskId: source.agentRetryOfTaskId ?? source.id,
     } : {}),
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,

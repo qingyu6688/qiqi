@@ -74,6 +74,11 @@ function normalizeAgentMessage(value: unknown): AgentMessage | null {
   }
 }
 
+export function getAgentSubmittedImageCount(round: Pick<AgentRound, 'outputTaskIds'>, tasks: TaskRecord[]): number {
+  const retryIds = new Set(tasks.filter((task) => task.agentRetryOfTaskId).map((task) => task.id))
+  return round.outputTaskIds.filter((id) => !retryIds.has(id)).length
+}
+
 export function isEmptyAgentConversation(conversation: AgentConversation) {
   return conversation.rounds.length === 0 && conversation.messages.length === 0 && !conversation.activeRoundId
 }

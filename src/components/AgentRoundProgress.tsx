@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { AgentRound, TaskRecord } from '../types'
+import { getAgentSubmittedImageCount } from '../lib/agentConversationState'
 
 export default function AgentRoundProgress({ round, tasks, hasContent = false, onRetry, retryDisabled = false }: { round: AgentRound; tasks: TaskRecord[]; hasContent?: boolean; onRetry?: () => void; retryDisabled?: boolean }) {
   const [now, setNow] = useState(Date.now)
@@ -22,7 +23,8 @@ export default function AgentRoundProgress({ round, tasks, hasContent = false, o
   const settled = tasks.filter((task) => task.status === 'done' || (task.status === 'error' && !task.falRecoverable && !task.customRecoverable)).length
   const planned = typeof round.requestedImageCount === 'number' && (tasks.length || round.outputTaskIds.length)
     ? Math.max(round.requestedImageCount, tasks.length) : tasks.length
-  const unsubmitted = Math.max(0, planned - Math.max(tasks.length, round.outputTaskIds.length))
+  const unsubmitted = typeof round.requestedImageCount === 'number' && planned > 0
+    ? Math.max(0, round.requestedImageCount - getAgentSubmittedImageCount(round, tasks)) : 0
   const canContinue = round.canResumeImagePlan && unsubmitted > 0
   const retry = round.requestState?.stage === 'retrying'
   const stage = !running
