@@ -6,6 +6,7 @@ import { callImageApi } from './api'
 import { callBatchImageSingle } from './agentApi'
 import { maybeAppendImageToolDroppedHint, maybeAppendStreamingHint } from './imageApiShared'
 import { getCustomQueuedImageResult } from './openaiCompatibleImageApi'
+import { MAX_AGENT_IMAGE_PROMPT_LENGTH, preserveAgentImageRequirements } from './agentImageReferences'
 
 describe('API error hints', () => {
   it.each([false, true])('uses the transparent background hint when streaming is %s', (streamImages) => {
@@ -23,6 +24,19 @@ describe('API error hints', () => {
 })
 
 describe('callImageApi', () => {
+  it.each(['images', 'responses'] as const)('%s 协议附加防改写和尺寸说明后，实际提示词仍在三万字符以内', async (apiMode) => {
+    const planned = '画'.repeat(MAX_AGENT_IMAGE_PROMPT_LENGTH - 512)
+    const prompt = preserveAgentImageRequirements(planned, '', 0)
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(apiMode === 'images'
+      ? { data: [{ b64_json: 'aW1hZ2U=' }] }
+      : { output: [{ type: 'image_generation_call', id: 'image', result: 'aW1hZ2U=' }] }), { headers: { 'Content-Type': 'application/json' } }))
+    await callImageApi({ settings: { ...DEFAULT_SETTINGS, apiKey: 'mock-key', apiMode, codexCli: true, streamImages: false, allowPromptRewrite: false }, prompt, params: { ...DEFAULT_PARAMS, size: '1024x1024' }, inputImageDataUrls: [] })
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body))
+    const actual = apiMode === 'images' ? body.prompt : body.input
+    expect(typeof actual).toBe('string')
+    expect(actual.length).toBeLessThanOrEqual(MAX_AGENT_IMAGE_PROMPT_LENGTH)
+    expect(actual).toContain(planned)
+  })
   it.each(['preserve', 'vary'] as const)('画廊同步多图请求使用用户选择的方案模式：%s', async (galleryImageVariation) => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ data: [{ b64_json: 'aW1hZ2U=' }] }), { headers: { 'Content-Type': 'application/json' } }))
     await callImageApi({ settings: { ...DEFAULT_SETTINGS, apiKey: 'mock-key', streamImages: false, galleryImageVariation }, prompt: '蓝色背景，猫在左侧，不要文字', params: { ...DEFAULT_PARAMS, n: 2 }, inputImageDataUrls: [] })

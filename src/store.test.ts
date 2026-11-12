@@ -13,6 +13,7 @@ import { setPresetConfig } from './lib/presetConfig'
 import { FetchConnectError } from './lib/platform'
 import { flushRegisteredStorageSaves } from './lib/storageSaveState'
 import { getImageRequestConcurrency } from './lib/imageRequestQueue'
+import { AGENT_IMAGE_PROMPT_EXCERPT_MARKER, MAX_AGENT_IMAGE_PROMPT_LENGTH } from './lib/agentImageReferences'
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
@@ -173,6 +174,62 @@ describe('对话原话、固定设定与参考图兜底', () => {
       settings: normalizeSettings({ profiles: [textProfile, imageProfile], activeProfileId: textProfile.id, agentApiConfigMode: 'hybrid', agentTextProfileId: textProfile.id, agentImageProfileId: imageProfile.id, agentCustomInstructions: '水彩画风', agentMaxToolRounds: 15 }),
       showToast: vi.fn(),
     })
+  })
+
+  it.each(['generate_image', 'generate_image_batch'])('%s 长原话实际请求受预算约束，独立规划持久化且重试沿用快照', async (tool) => {
+    const original = `开头蓝色背景${'参考资料'.repeat(5000)}末尾禁止边框`
+    const planned = '完整白猫规划，文字“柒柒”，两只猫'
+    useStore.setState({ prompt: original, settings: { ...useStore.getState().settings, agentCustomInstructions: '水彩画风'.repeat(2000) } })
+    await useStore.getState().setAgentConversationInstructions('guidance', '蓝围巾白猫'.repeat(1600))
+    vi.mocked(callAgentResponsesApi)
+      .mockResolvedValueOnce({ text: '', images: [], outputItems: [{ type: 'function_call', name: tool, call_id: 'long', arguments: JSON.stringify(tool === 'generate_image' ? { prompt: planned } : { images: [{ id: 'a', prompt: planned }] }) }] })
+      .mockResolvedValueOnce({ text: '完成', images: [], outputItems: [] })
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0].rounds[0]?.status).toBe('done'))
+    const request = vi.mocked(callImageApi).mock.calls[0][0]
+    expect(request.prompt.length).toBeLessThanOrEqual(MAX_AGENT_IMAGE_PROMPT_LENGTH)
+    expect(request.prompt).toContain(planned)
+    expect(request.prompt).toContain('开头蓝色背景')
+    expect(request.prompt).toContain('末尾禁止边框')
+    expect(request.prompt).toContain(AGENT_IMAGE_PROMPT_EXCERPT_MARKER)
+    expect(useStore.getState().agentConversations[0].rounds[0].contextNotice).toContain('已按预算摘录')
+    expect(useStore.getState().agentConversations[0].messages.find((item) => item.role === 'user')?.content).toBe(original)
+    const source = useStore.getState().tasks[0]
+    expect(source.agentPlannedPrompt).toBe(planned)
+    expect((await getAllTasks())[0].agentPlannedPrompt).toBe(planned)
+    useStore.getState().setSettings({ agentCustomInstructions: '另一种画风' })
+    await retryTask(source)
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(callImageApi).mock.calls[1][0].prompt).toBe(request.prompt)
+    expect(useStore.getState().tasks[0].agentPlannedPrompt).toBe(planned)
+    await vi.waitFor(() => expect(useStore.getState().tasks.every((task) => task.status === 'done')).toBe(true))
+  })
+
+  it('一批中的任一规划超长时整批在提交前停止，不遗留运行中的卡片', async () => {
+    useStore.setState({ prompt: '画两张独立海报' })
+    vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({ text: '', images: [], outputItems: [{ type: 'function_call', name: 'generate_image_batch', call_id: 'oversized', arguments: JSON.stringify({ images: [{ id: 'valid', prompt: '蓝色白猫海报' }, { id: 'large', prompt: '长'.repeat(MAX_AGENT_IMAGE_PROMPT_LENGTH + 1) }] }) }] })
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(useStore.getState().agentConversations[0].rounds[0]?.status).toBe('error'))
+    expect(useStore.getState().agentConversations[0].rounds[0].error).toContain('未提交生图请求')
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks).toHaveLength(0)
+  })
+
+  it('旧版已保存的超长任务重试时先拦截，保留原任务与原图', async () => {
+    const source: TaskRecord = {
+      id: 'legacy-long', prompt: '画面要求'.repeat(9000), params: { ...DEFAULT_PARAMS }, inputImageIds: [], outputImages: ['kept-output'],
+      status: 'done', error: null, createdAt: 1, finishedAt: 2, elapsed: 1, sourceMode: 'agent', agentConversationId: 'guidance', agentRoundId: 'old', apiProfileId: imageProfile.id,
+    }
+    useStore.setState({ tasks: [source], agentConversations: [{
+      id: 'guidance', title: '旧版任务', activeRoundId: 'old', createdAt: 1, updatedAt: 1, messages: [], rounds: [{
+        id: 'old', index: 1, parentRoundId: null, userMessageId: 'old-user', prompt: '白猫', inputImageIds: [], outputTaskIds: [source.id], status: 'done', error: null, createdAt: 1, finishedAt: 2,
+      }],
+    }] })
+    await retryTask(source)
+    await vi.waitFor(() => expect(useStore.getState().tasks.find((task) => task.id !== source.id)?.status).toBe('error'))
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks.find((task) => task.id !== source.id)?.error).toContain('未提交生图请求')
+    expect(useStore.getState().tasks.find((task) => task.id === source.id)).toEqual(source)
   })
 
   it.each(['generate_image', 'generate_image_batch'])('%s 漏写引用时仍将本轮参考图发送给生图接口', async (tool) => {

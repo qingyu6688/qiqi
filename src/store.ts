@@ -24,7 +24,7 @@ import type {
 } from './types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, MAX_AGENT_IMAGES_PER_ROUND, MAX_AGENT_PLAN_BATCH_IMAGES, DEFAULT_PARAMS } from './types'
 import { createIndependentImagePrompt } from './lib/independentImages'
-import { getAgentGuidance, normalizeAgentInstructions } from './lib/agentGuidance'
+import { normalizeAgentInstructions } from './lib/agentGuidance'
 import { fitOutputImage } from './lib/outputImageSize'
 import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentImageQueueProfiles, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, resolveApiProfileModel, splitModelList, validateApiProfile } from './lib/apiProfiles'
 import { enforcePresetConfigPolicy, getPresetConfig, getPresetProfileIds, getPresetProviderIds, isPresetConfigDeletionPrevented, isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile, isPresetProviderDeletionPrevented } from './lib/presetConfig'
@@ -53,7 +53,7 @@ import {
 import { callImageApi } from './lib/api'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage } from './lib/agentApi'
 import { buildAgentApiInput, buildAgentContinuationInput } from './lib/agentInputBuilder'
-import { collectAgentRoundOutputImageSlots, createAgentReferenceBatch, extractAgentReferenceIds, getAgentImageReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId, getAgentReferenceTag, LOCAL_REFERENCE_BATCH_PREFIX, preserveAgentImageRequirements } from './lib/agentImageReferences'
+import { collectAgentRoundOutputImageSlots, createAgentReferenceBatch, extractAgentReferenceIds, getAgentImageReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId, getAgentReferenceTag, LOCAL_REFERENCE_BATCH_PREFIX, AGENT_IMAGE_PROMPT_EXCERPT_MARKER, assertAgentImagePromptLength, preserveAgentImageRequirements } from './lib/agentImageReferences'
 import { showBrowserNotification } from './lib/browserNotification'
 import { IMAGE_FETCH_CORS_HINT, isHttpUrl } from './lib/imageApiShared'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
@@ -2983,7 +2983,7 @@ async function executeAgentRound(
       toolCallId: string,
       taskPrompt = '',
       inputImageIds = round.inputImageIds ?? [],
-      options: { createdAt?: number; agentBatchCallId?: string; agentBatchItemId?: string; maskTargetImageId?: string | null; maskImageId?: string | null; taskParams?: TaskParams; queued?: boolean; apiProfile?: ApiProfile; localReference?: boolean } = {},
+      options: { plannedPrompt?: string; createdAt?: number; agentBatchCallId?: string; agentBatchItemId?: string; maskTargetImageId?: string | null; maskImageId?: string | null; taskParams?: TaskParams; queued?: boolean; apiProfile?: ApiProfile; localReference?: boolean } = {},
     ) => {
       const existingTaskId = taskIdByToolCallId.get(toolCallId)
       if (existingTaskId) return existingTaskId
@@ -3001,6 +3001,7 @@ async function executeAgentRound(
       const task: TaskRecord = {
         id: genId(),
         prompt: taskPrompt,
+        agentPlannedPrompt: options.plannedPrompt,
         params: options.taskParams ?? { ...imageParams, n: 1 },
         apiProvider: taskProfile.provider,
         apiProfileId: taskProfile.id,
@@ -3278,6 +3279,22 @@ async function executeAgentRound(
       }
     }
 
+    const createImagePrompt = (plannedPrompt: string): string => {
+      const prompt = preserveAgentImageRequirements(plannedPrompt, userMessage.content, round.inputImageIds.length, {
+        globalInstructions: requestSettings.agentCustomInstructions,
+        conversationInstructions: conversation.instructions,
+      })
+      if (prompt.includes(AGENT_IMAGE_PROMPT_EXCERPT_MARKER)) {
+        const notice = '生图补充内容过长，原话或固定设定已按预算摘录；完整原文仍保存在本机。'
+        updateAgentConversation(conversationId, (current) => ({
+          ...current,
+          rounds: current.rounds.map((item) => item.id === roundId && !item.contextNotice?.includes(notice)
+            ? { ...item, contextNotice: [item.contextNotice, notice].filter(Boolean).join('；') } : item),
+        }))
+      }
+      return prompt
+    }
+
     const executeSingleImageFunctionCall = async (functionCallItem: ResponsesOutputItem): Promise<string | null> => {
       if (getRemainingImageCount() !== undefined) throw new Error('已指定生图数量，请使用批量图像工具逐张提交')
       const callId = functionCallItem.call_id ?? ''
@@ -3286,7 +3303,7 @@ async function executeAgentRound(
 
       const referenceIds = getAgentImageReferenceIds(item.prompt, round)
       const references = await resolveReferenceImages(referenceIds)
-      const imagePrompt = preserveAgentImageRequirements(item.prompt, userMessage.content, round.inputImageIds.length, getAgentGuidance(requestSettings.agentCustomInstructions, conversation.instructions))
+      const imagePrompt = createImagePrompt(item.prompt)
       const toolCallId = callId || genId()
       const taskParams = {
         ...normalizeParamsForSettings(imageParams, imageRequestSettings, { hasInputImages: references.dataUrls.length > 0 }),
@@ -3294,6 +3311,7 @@ async function executeAgentRound(
       }
 
       const taskId = await ensureStreamingAgentTask(toolCallId, imagePrompt, references.imageIds, {
+        plannedPrompt: item.prompt,
         createdAt: Date.now(),
         queued: true,
         taskParams,
@@ -3355,14 +3373,16 @@ async function executeAgentRound(
       if (batchItems.length > remainingBudget) throw new Error(`本轮最多生成 ${MAX_AGENT_IMAGES_PER_ROUND} 张图片，剩余 ${Math.max(0, remainingBudget)} 张；模型提交了 ${batchItems.length} 张，已停止提交。请减少数量或在下一条消息继续。`)
       if (remainingCount !== undefined && batchItems.length > remainingCount) throw new Error(`文本模型提交了 ${batchItems.length} 张图片任务，超过本轮剩余的 ${remainingCount} 张，已停止提交。请重试或切换文本模型。`)
 
-      // Create task cards in model-provided order before starting network calls.
+      const imagePrompts = batchItems.map((item) => createImagePrompt(item.prompt))
+
+      // 按规划顺序建立任务卡，全部提示词通过长度检查后才发送请求。
       const batchExecutionItems = []
       const queueOffset = submittedImageCount
       for (const [index, item] of batchItems.entries()) {
         if (controller.signal.aborted) throw createAgentAbortError()
         const referenceIds = ownReferencePerImage ? [getAgentCurrentReferenceId(round, index)] : getAgentImageReferenceIds(item.prompt, round)
         const references = await resolveReferenceImages(referenceIds)
-        const imagePrompt = preserveAgentImageRequirements(item.prompt, userMessage.content, round.inputImageIds.length, getAgentGuidance(requestSettings.agentCustomInstructions, conversation.instructions))
+        const imagePrompt = imagePrompts[index]
         const batchToolCallId = genId()
         const taskProfile = queueProfiles[(queueOffset + index) % queueProfiles.length]
         const taskSettings = taskProfile.id === imageProfile.id ? imageRequestSettings : createSettingsForApiProfile(requestSettings, taskProfile)
@@ -3373,6 +3393,7 @@ async function executeAgentRound(
             }
           : { ...imageParams, n: 1 }
         await ensureStreamingAgentTask(batchToolCallId, imagePrompt, references.imageIds, {
+          plannedPrompt: item.prompt,
           createdAt: Date.now(),
           queued: true,
           taskParams,
@@ -4031,6 +4052,7 @@ async function executeTask(taskId: string) {
     const requestPrompt = task.transparentOutput && task.transparentPrompt
       ? task.transparentPrompt
       : task.prompt
+    if (isAgentTask(task)) assertAgentImagePromptLength(requestPrompt)
 
     const independentPrompt = task.independentImage
       ? createIndependentImagePrompt(requestPrompt, task.independentImage.index, task.independentImage.total, requestSettings.galleryImageVariation)
@@ -4370,6 +4392,7 @@ export async function retryTask(task: TaskRecord) {
     independentImage: source.independentImage,
     galleryImageVariation: source.galleryImageVariation,
     agentLocalReference: source.agentLocalReference,
+    agentPlannedPrompt: source.agentPlannedPrompt,
     ...(sourceConversation && sourceRound ? {
       sourceMode: 'agent' as const,
       agentConversationId: sourceConversation.id,

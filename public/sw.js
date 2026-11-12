@@ -1,4 +1,4 @@
-const CACHE_NAME = 'qiqi-v1.5.1'
+const CACHE_NAME = 'qiqi-v1.5.2'
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './qiqi.png', './color-mode.js']
 const APP_SHELL_URLS = new Set(APP_SHELL.map((path) => new URL(path, self.registration.scope).href))
 const ASSETS_PATH = new URL('./assets/', self.registration.scope).pathname

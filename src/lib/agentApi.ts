@@ -35,7 +35,7 @@ const AGENT_IMAGE_INSTRUCTIONS = [
   '## Progressive Batch Generation',
   'For multi-image requests, use a progressive batching strategy to ensure consistency:',
   '  1. 后续图片确实需要引用尚未生成的基础图时，先生成基础图。可以共用现有参考图的独立任务可以同时提交。',
-  '  2. 图片之间没有依赖时，按本轮给出的批次上限提交尽可能多的独立图片，收到结果后再规划下一批。逐条保留本张适用的文字原文、颜色、元素数量、位置、构图、禁止项和仍有效的角色及画风设定。每张提示词都应完整，不能用“同上”代替细节。',
+  '  2. 图片之间没有依赖时，按本轮给出的批次上限提交尽可能多的独立图片，收到结果后再规划下一批。逐条保留本张适用的文字原文、颜色、元素数量、位置、构图、禁止项和仍有效的角色及画风设定。每张提示词都应完整，不能用“同上”代替细节。附加的用户原话可能因长度只保留摘录，具体画面要求必须写在每张规划中，不能依赖附加资料补齐。',
   '  3. 独立图片：多张图片使用 generate_image_batch，每张图片对应 images 数组中的一个条目。五张图片必须是五个独立条目和五个独立图片文件，不能合成一张拼贴或宫格。共享风格不意味着共享一张画布。',
   'As the turn continues, output a brief progress note before each tool call.',
   'For single-image requests, generate directly without any listing.',

@@ -3,12 +3,14 @@ import { getAgentRoundPath } from './agentConversationState'
 import { getTaskPromptText } from './promptImageMentions'
 import {
   collectAgentRoundOutputImageSlots,
+  AGENT_ORIGINAL_REQUIREMENTS_PREFIX,
   extractAgentReferenceIds,
   getAgentCurrentReferenceId,
   getAgentGeneratedImageReferenceId,
   replaceAgentPromptImageReferencesForApi,
 } from './agentImageReferences'
 import { getAgentRoundResponseOutput, sanitizeResponseOutputForInput } from './agentResponseState'
+import { excerptText } from './textExcerpt'
 
 type LoadImage = (id: string) => Promise<string | null | undefined>
 
@@ -20,6 +22,14 @@ const REQUIRED_IMAGE_BUDGET = 32 * 1024 * 1024
 const CURRENT_TEXT_LIMIT = 96_000
 const CONTINUATION_TEXT_LIMIT = 192_000
 const HISTORY_EXCERPT_LENGTH = 1000
+const HISTORY_IMAGE_DESCRIPTION_LENGTH = 200
+const ATTACHED_IMAGE_DESCRIPTION_LENGTH = 1200
+const CONTEXT_NOTICE_RESERVE = 1024
+
+interface InputReferenceItem {
+  role: string
+  content: Array<{ type: string; text?: string; image_url?: string }>
+}
 
 interface BuildAgentApiInputOptions {
   conversation: AgentConversation
@@ -76,9 +86,11 @@ function escapeXmlAttribute(value: string) {
     .replace(/>/g, '&gt;')
 }
 
-function createGeneratedImageReferencePart(round: AgentRound, task: TaskRecord, imageIndex: number) {
-  const prompt = getTaskPromptText(typeof task.prompt === 'string' ? task.prompt : '', task.inputImageIds.length).replace(/\s+/g, ' ').trim()
-  const truncatedPrompt = prompt.length > 1200 ? `${prompt.slice(0, 1200)}...` : prompt
+function createGeneratedImageReferencePart(round: AgentRound, task: TaskRecord, imageIndex: number, maxLength: number) {
+  const planned = typeof task.agentPlannedPrompt === 'string' ? task.agentPlannedPrompt
+    : (typeof task.prompt === 'string' ? task.prompt : '').split(`\n\n${AGENT_ORIGINAL_REQUIREMENTS_PREFIX}`)[0].split('\n\n固定创作设定：')[0]
+  const prompt = getTaskPromptText(planned, task.inputImageIds.length).replace(/\s+/g, ' ').trim()
+  const truncatedPrompt = excerptText(prompt, maxLength, '…')
   const promptAttribute = truncatedPrompt ? ` prompt="${escapeXmlAttribute(truncatedPrompt)}"` : ''
   return {
     type: 'input_text',
@@ -86,7 +98,7 @@ function createGeneratedImageReferencePart(round: AgentRound, task: TaskRecord, 
   }
 }
 
-async function createGeneratedImagesInputItem(round: AgentRound, tasks: TaskRecord[], loadImage: LoadImage) {
+async function createGeneratedImagesInputItem(round: AgentRound, tasks: TaskRecord[], loadImage: LoadImage): Promise<InputReferenceItem | null> {
   const content: Array<{ type: string; text?: string; image_url?: string }> = []
   let imageIndex = 0
   for (const taskId of round.outputTaskIds) {
@@ -99,7 +111,7 @@ async function createGeneratedImagesInputItem(round: AgentRound, tasks: TaskReco
     for (const imageId of task.outputImages) {
       const dataUrl = await loadImage(imageId)
       if (dataUrl) content.push({ type: 'input_image', image_url: dataUrl })
-      content.push(createGeneratedImageReferencePart(round, task, imageIndex))
+      content.push(createGeneratedImageReferencePart(round, task, imageIndex, dataUrl ? ATTACHED_IMAGE_DESCRIPTION_LENGTH : HISTORY_IMAGE_DESCRIPTION_LENGTH))
       imageIndex += 1
     }
   }
@@ -117,7 +129,7 @@ async function createBatchImagesInputItem(round: AgentRound, tasks: TaskRecord[]
       if (batchIds.has(taskId) && task.status === 'done') {
         const dataUrl = await loadImage(imageId)
         if (dataUrl) content.push({ type: 'input_image', image_url: dataUrl })
-        content.push(createGeneratedImageReferencePart(round, task, imageIndex))
+        content.push(createGeneratedImageReferencePart(round, task, imageIndex, dataUrl ? ATTACHED_IMAGE_DESCRIPTION_LENGTH : HISTORY_IMAGE_DESCRIPTION_LENGTH))
       }
       imageIndex += 1
     }
@@ -147,10 +159,7 @@ function serializedTextLength(input: unknown): number {
 }
 
 function getHistoryExcerpt(text: string): string {
-  if (text.length <= HISTORY_EXCERPT_LENGTH) return text
-  const marker = '\n……（中间内容已摘录）……\n'
-  const half = Math.floor((HISTORY_EXCERPT_LENGTH - marker.length) / 2)
-  return text.slice(0, half) + marker + text.slice(-half)
+  return excerptText(text, HISTORY_EXCERPT_LENGTH)
 }
 
 function getAssistantExcerpt(conversation: AgentConversation, round: AgentRound): string {
@@ -217,8 +226,36 @@ export async function buildAgentApiInput(options: BuildAgentApiInputOptions): Pr
     if (dataUrl) sentImages.add(id)
     return dataUrl
   }
+  const currentInput = await createUserInputItem(options.conversation, options.currentRound, currentMessage, options.tasks, async (id) => images.get(id))
+  const historyBudget = Math.max(0, Math.min(HISTORY_TEXT_BUDGET, CURRENT_TEXT_LIMIT + HISTORY_TEXT_BUDGET - serializedTextLength([currentInput]) - CONTEXT_NOTICE_RESERVE))
+  const referenceBlocks = new Map<string, InputReferenceItem[]>()
+  for (const round of history) {
+    const items: InputReferenceItem[] = []
+    const referenceContent: InputReferenceItem['content'] = []
+    for (const [index, id] of round.inputImageIds.entries()) {
+      const dataUrl = await loadHistoryImage(id)
+      if (dataUrl) referenceContent.push({ type: 'input_image', image_url: dataUrl })
+      referenceContent.push({ type: 'input_text', text: `<ref id="${getAgentCurrentReferenceId(round, index)}" />` })
+    }
+    if (referenceContent.length > 0) items.push({ role: 'user', content: referenceContent })
+    const imagesItem = await createGeneratedImagesInputItem(round, options.tasks, loadHistoryImage)
+    if (imagesItem) items.push(imagesItem)
+    referenceBlocks.set(round.id, items)
+  }
+  const referenceItems = [...referenceBlocks.values()].flat()
+  let referenceTextSize = serializedTextLength(referenceItems)
+  let compactedDescriptions = 0
+  // 描述与历史文字共用预算，较旧描述先让出空间；图片编号始终保留。
+  for (const part of referenceItems.flatMap((item) => item.content)) {
+    if (referenceTextSize <= historyBudget / 2) break
+    if (!part.text?.startsWith('<ref id=') || !part.text.includes(' prompt="')) continue
+    const previousSize = serializedTextLength(part)
+    part.text = part.text.replace(/ prompt="[^"]*"/, '')
+    referenceTextSize -= previousSize - serializedTextLength(part)
+    compactedDescriptions += 1
+  }
   const historyBlocks = new Map<string, unknown[]>()
-  let remainingText = HISTORY_TEXT_BUDGET
+  let remainingText = Math.max(0, historyBudget - referenceTextSize)
   let compactedRounds = 0
   for (const [reverseIndex, round] of [...history].reverse().entries()) {
     const userMessage = options.conversation.messages.find((message) => message.id === round.userMessageId)
@@ -243,29 +280,22 @@ export async function buildAgentApiInput(options: BuildAgentApiInputOptions): Pr
   for (const round of history) {
     const block = historyBlocks.get(round.id)
     if (block) input.push(...block)
-    const referenceContent: Array<{ type: string; image_url?: string; text?: string }> = []
-    for (const [index, id] of round.inputImageIds.entries()) {
-      const dataUrl = await loadHistoryImage(id)
-      if (dataUrl) referenceContent.push({ type: 'input_image', image_url: dataUrl })
-      referenceContent.push({ type: 'input_text', text: `<ref id="${getAgentCurrentReferenceId(round, index)}" />` })
-    }
-    if (referenceContent.length > 0) input.push({ role: 'user', content: referenceContent })
-    const imagesItem = await createGeneratedImagesInputItem(round, options.tasks, loadHistoryImage)
-    if (imagesItem) input.push(imagesItem)
+    input.push(...(referenceBlocks.get(round.id) ?? []))
   }
   const omittedImages = new Set(historyImageIds.filter((id) => !includedImages.has(id))).size
-  if (compactedRounds > 0 || omittedImages > 0) {
+  if (compactedRounds > 0 || omittedImages > 0 || compactedDescriptions > 0) {
     const notice = [
       compactedRounds > 0 ? `${compactedRounds} 轮较早或过长的历史文字已按预算摘录或省略` : '',
-      omittedImages > 0 ? `${omittedImages} 张历史图片未附图片内容，仍保留编号和已有提示词，可继续引用` : '',
+      omittedImages > 0 ? `${omittedImages} 张历史图片未附图片内容，仍保留编号，可继续引用` : '',
+      compactedDescriptions > 0 ? `${compactedDescriptions} 张较旧历史图已省略描述，编号仍可引用` : '',
       '完整记录仍保留在本机；需要旧细节时请重新说明或引用图片。',
     ].filter(Boolean).join('；')
     options.onContextCompacted?.(notice)
     input.push({ role: 'user', content: [{ type: 'input_text', text: `上下文范围说明：${notice}` }] })
   }
-  input.push(await createUserInputItem(options.conversation, options.currentRound, currentMessage, options.tasks, async (id) => images.get(id)))
+  input.push(currentInput)
   if (serializedTextLength(input) > CURRENT_TEXT_LIMIT + HISTORY_TEXT_BUDGET) {
-    throw new Error('本次对话中的文字和图片引用信息过长，请减少参考图或拆分消息后发送。历史记录已保留。')
+    throw new Error('历史描述已压缩，但本轮文字和图片编号仍超过请求预算。请拆分本轮消息，或新建对话并选择需要的图片；完整历史记录已保留。')
   }
   return input
 }

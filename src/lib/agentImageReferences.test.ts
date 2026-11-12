@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { AgentRound, TaskRecord } from '../types'
 import { DEFAULT_PARAMS } from '../types'
 import { getSelectedImageMentionLabel, getSelectedTextMentionLabel } from './promptImageMentions'
-import { createAgentReferenceBatch, extractAgentReferenceIds, getAgentImageReferenceIds, preserveAgentImageRequirements, replaceAgentPromptImageReferencesForApi, resolveAgentPromptImageReferences } from './agentImageReferences'
+import { AGENT_IMAGE_PROMPT_EXCERPT_MARKER, createAgentReferenceBatch, extractAgentReferenceIds, getAgentImageReferenceIds, MAX_AGENT_IMAGE_PROMPT_LENGTH, preserveAgentImageRequirements, replaceAgentPromptImageReferencesForApi, resolveAgentPromptImageReferences } from './agentImageReferences'
 
 const round = (patch: Partial<AgentRound>): AgentRound => ({
   id: patch.id ?? `round-${patch.index ?? 1}`,
@@ -35,10 +35,52 @@ const task = (id: string, outputImages: string[]): TaskRecord => ({
 })
 
 describe('agent image references', () => {
+  it('两万字资料和两份八千字设定不会超长，保留规划、原话首尾及摘录标记', () => {
+    const planned = '白猫海报，指定文字“柒柒”，蓝底，不要边框'
+    const original = `开头要求：两只白猫${'参考资料'.repeat(5000)}结尾要求：不要红色`
+    const prompt = preserveAgentImageRequirements(planned, original, 0, { conversationInstructions: '对话设定'.repeat(2000), globalInstructions: '全局偏好'.repeat(2000) })
+    expect(prompt.length).toBeLessThanOrEqual(MAX_AGENT_IMAGE_PROMPT_LENGTH)
+    expect(prompt.startsWith(planned)).toBe(true)
+    expect(prompt).toContain('开头要求：两只白猫')
+    expect(prompt).toContain('结尾要求：不要红色')
+    expect(prompt).toContain(AGENT_IMAGE_PROMPT_EXCERPT_MARKER)
+  })
+
+  it('规划本身很长时依次压缩附加内容，规划完整保留且原话首尾仍在', () => {
+    const planned = `完整规划起点${'画面细节'.repeat(5000)}完整规划终点`
+    const prompt = preserveAgentImageRequirements(planned, `原话首段${'资料'.repeat(10_000)}原话末段`, 0, {
+      conversationInstructions: `角色首段${'设定'.repeat(3990)}角色末段`,
+      globalInstructions: '个人偏好'.repeat(2000),
+    })
+    expect(prompt.length).toBeLessThanOrEqual(MAX_AGENT_IMAGE_PROMPT_LENGTH)
+    expect(prompt.startsWith(planned)).toBe(true)
+    expect(prompt).toContain('原话首段')
+    expect(prompt).toContain('原话末段')
+    expect(prompt).toContain('角色首段')
+    expect(prompt).toContain('角色末段')
+  })
+
+  it('完整规划超过可提交长度时明确拒绝，不截断规划', () => {
+    expect(() => preserveAgentImageRequirements('画'.repeat(MAX_AGENT_IMAGE_PROMPT_LENGTH + 1), '白猫', 0)).toThrow('未提交生图请求')
+  })
+
+  it('逐张参考图路径只拼接一次标准化原话，长原话同样受预算约束', () => {
+    const original = `依次根据每张图生成白猫海报，开头要求蓝色${'参考资料'.repeat(5000)}结尾不要边框`
+    const plans = createAgentReferenceBatch(original, 5, 5, false)!
+    expect(plans).toHaveLength(5)
+    for (const item of plans) {
+      const prompt = preserveAgentImageRequirements(item.prompt, original, 5)
+      expect(prompt.split('开头要求蓝色')).toHaveLength(2)
+      expect(prompt.split('结尾不要边框')).toHaveLength(2)
+      expect(prompt).not.toContain('用户要求：')
+      expect(prompt).toContain('用户原始要求：')
+      expect(prompt.length).toBeLessThanOrEqual(MAX_AGENT_IMAGE_PROMPT_LENGTH)
+    }
+  })
   it('每张保留原话中的文字、颜色、数量和禁止项，原话已经存在时不重复添加', () => {
     const original = '生成三张海报，文字必须是“柒柒”，天蓝色底，右下角两只猫，不要边框'
     for (let i = 1; i <= 3; i++) {
-      const result = preserveAgentImageRequirements(`第 ${i} 张海报`, original, 0, '主角为戴蓝围巾的白猫')
+      const result = preserveAgentImageRequirements(`第 ${i} 张海报`, original, 0, { conversationInstructions: '主角为戴蓝围巾的白猫' })
       expect(result.startsWith(`第 ${i} 张海报`)).toBe(true)
       expect(result).toContain(original)
       expect(result).toContain('其他图片的主题不画进本张')

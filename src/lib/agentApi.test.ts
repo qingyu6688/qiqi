@@ -17,6 +17,7 @@ it('固定设定放入每次请求的 instructions，不依赖历史文字和图
     expect(body.instructions).toContain('水彩画风，不要边框')
     expect(body.instructions).toContain('戴蓝围巾的白猫')
     expect(body.instructions).toContain('逐条保留本张适用的文字原文')
+    expect(body.instructions).toContain('附加的用户原话可能因长度只保留摘录')
     expect(body.instructions).toContain('客户端会从本机读取对应图片')
   } finally {
     fetchMock.mockRestore()

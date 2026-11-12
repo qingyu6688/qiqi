@@ -3,6 +3,7 @@ import type { AgentConversation, AgentMessage, AgentRound, TaskRecord } from '..
 import { DEFAULT_PARAMS } from '../types'
 import { getSelectedImageMentionLabel } from './promptImageMentions'
 import { buildAgentApiInput, buildAgentContinuationInput } from './agentInputBuilder'
+import { AGENT_ORIGINAL_REQUIREMENTS_PREFIX } from './agentImageReferences'
 
 function round(id: string, index: number, patch: Partial<AgentRound> = {}): AgentRound {
   return {
@@ -63,6 +64,58 @@ function conversation(rounds: AgentRound[], messages: AgentMessage[]): AgentConv
 const noImage = async () => undefined
 
 describe('agent input builder', () => {
+  it('二十轮两百张长提示词图片仍可继续，旧图保留编号，最近两轮保留描述与近期文字', async () => {
+    const history = Array.from({ length: 20 }, (_, index) => round(`round-${index + 1}`, index + 1, {
+      outputTaskIds: Array.from({ length: 10 }, (_, image) => `task-${index + 1}-${image + 1}`),
+    }))
+    const tasks = history.flatMap((item) => item.outputTaskIds.map((id, index) => task(id, {
+      agentPlannedPrompt: `第${item.index}轮第${index + 1}张白猫${'画面细节'.repeat(400)}`,
+      prompt: `规划\n\n${AGENT_ORIGINAL_REQUIREMENTS_PREFIX}${'原话补充'.repeat(5000)}\n\n固定创作设定：${'角色设定'.repeat(2000)}`,
+      outputImages: [`image-${id}`],
+    })))
+    const current = round('round-21', 21, { status: 'running' })
+    const messages = [...history.map((item) => message(item, `近期要求${item.index}不要文字${'场景讨论'.repeat(700)}`)), message(current, '请继续画海边白猫')]
+    const data = conversation([...history, current], messages)
+    const snapshot = JSON.stringify({ data, tasks })
+    const notice = vi.fn()
+    const input = await buildAgentApiInput({ conversation: data, currentRound: current, tasks, loadImage: async (id) => `data:${id}`, onContextCompacted: notice })
+    const content = (input as Array<{ content?: Array<{ type: string; text?: string }> }>).flatMap((item) => item.content ?? [])
+    const refs = content.filter((part) => part.text?.startsWith('<ref id="round-') && part.text.includes('-image-'))
+    expect(refs).toHaveLength(200)
+    for (const item of history) for (let image = 1; image <= 10; image++) expect(refs.some((part) => part.text?.includes(`id="round-${item.index}-image-${image}"`))).toBe(true)
+    expect(refs[0].text).not.toContain('prompt=')
+    expect(refs.slice(-20).every((part) => part.text?.includes('prompt='))).toBe(true)
+    expect(content.filter((part) => part.type === 'input_image')).toHaveLength(4)
+    const text = JSON.stringify(input, (key, value: unknown) => key === 'image_url' ? '' : value)
+    expect(text.length).toBeLessThan(50_000)
+    expect(text).toContain('近期要求20不要文字')
+    expect(text).toContain('请继续画海边白猫')
+    expect(text).not.toContain('原话补充')
+    expect(text).not.toContain('固定创作设定')
+    expect(notice).toHaveBeenCalledWith(expect.stringContaining('已省略描述'))
+    expect(JSON.stringify({ data, tasks })).toBe(snapshot)
+  })
+
+  it('旧任务没有独立规划字段时，历史描述排除附加原话和固定设定', async () => {
+    const previous = round('round-1', 1, { outputTaskIds: ['legacy'] })
+    const current = round('round-2', 2)
+    const input = await buildAgentApiInput({ conversation: conversation([previous, current], [message(previous, '画白猫'), message(current, '继续')]), currentRound: current,
+      tasks: [task('legacy', { prompt: `白猫在海边\n\n${AGENT_ORIGINAL_REQUIREMENTS_PREFIX}不应重复的长原话\n\n固定创作设定：不应重复的固定设定`, outputImages: ['cat'] })], loadImage: async () => 'data:cat' })
+    const text = JSON.stringify(input)
+    expect(text).toContain('白猫在海边')
+    expect(text).not.toContain('不应重复')
+  })
+
+  it('XML 转义后的描述长度也计入预算，当前长消息完整保留', async () => {
+    const previous = round('round-1', 1, { outputTaskIds: ['escaped'] })
+    const current = round('round-2', 2)
+    const currentText = '\\"'.repeat(30_000)
+    const input = await buildAgentApiInput({ conversation: conversation([previous, current], [message(previous, '历史'), message(current, currentText)]), currentRound: current,
+      tasks: [task('escaped', { prompt: '&"<>'.repeat(1000), outputImages: Array.from({ length: 200 }, (_, index) => `image-${index}`) })], loadImage: async (id) => `data:${id}` })
+    const latest = input[input.length - 1] as { content: Array<{ text: string }> }
+    expect(latest.content[0].text).toBe(currentText)
+    expect(JSON.stringify(input, (key, value: unknown) => key === 'image_url' ? '' : value).length).toBeLessThanOrEqual(144_000)
+  })
   it('八张历史生成图都保留编号及描述，只附最近四张像素', async () => {
     const first = round('round-1', 1, { outputTaskIds: ['images'] })
     const current = round('round-2', 2, { status: 'running' })
@@ -517,7 +570,7 @@ describe('agent input builder', () => {
 
     expect(JSON.stringify(input)).toContain('data:current-image')
     expect(JSON.stringify(input)).not.toContain('data:image/png;base64,')
-    expect(onContextCompacted).toHaveBeenCalledWith(expect.stringContaining('仍保留编号和已有提示词'))
+    expect(onContextCompacted).toHaveBeenCalledWith(expect.stringContaining('仍保留编号'))
   })
 
   it('当前输入或明确附件过大时给出可操作错误，不静默删减', async () => {

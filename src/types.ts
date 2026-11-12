@@ -344,6 +344,8 @@ export interface TaskRecord {
   agentBatchItemId?: string
   /** 逐参考图直接生成的任务在重试时由客户端补充尺寸提示。 */
   agentLocalReference?: boolean
+  /** 不含原话及固定设定等附加内容的单张创作规划，供历史图描述使用。 */
+  agentPlannedPrompt?: string
   /** 手动重试保留任务记录，不占用原轮次的新增图片数量。 */
   agentRetryOfTaskId?: string
   /** Agent 图像工具实际动作 */
